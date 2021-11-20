@@ -5,8 +5,6 @@ import os
 import argparse
 
 def main():
-    plt.ion()
-    
     parser = argparse.ArgumentParser()
     parser.add_argument('input_dir', help='input directory in which VOC-format labels are stored as .py files')
     parser.add_argument('output_dir', help='output directory in which .npy files representing object-wise masks will be saved')
