@@ -18,8 +18,8 @@ python voc2object_wise_mask.py dataset_voc/SegmentationClass masks labels.txt
 ```
 This transforms VOC-format labels into object-wise masks for each class, e.g.
 ```
-masks/[class1].npy: (n_object of class1, height, width)
-masks/[class2].npy: (n_object of class2, height, width)
+masks/[image1]_class1.npy: (n_object of class1 in image1, height, width)
+masks/[image1]_class2.npy: (n_object of class2 in image1, height, width)
 ...
 ```
 Now you can use `torchvision.ops.masks_to_boxes` to convert the masks into bounding boxes used in object detection problems.
