@@ -53,7 +53,7 @@ def tensorimage_to_numpy(tensor):
     return tensor.numpy().transpose((1, 2, 0))
 
 class foreground_obj:
-    _affine = torchvision.transforms.RamdomAffine(
+    _affine = torchvision.transforms.RandomAffine(
         degrees=180,
         translate=(0.4, 0.4)
     )
