@@ -154,7 +154,7 @@ class background:
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('mask_dir', help='input directory where mask files named [image_name]_class[class_id].npy are placed')
-    parser.add_argument('rep_dir', help='input directory where representative image files are placed. Note that a filename must have the format of [video name]_[%M%S] where %M and %S denote minute and second as decimal numbers, respectedly')
+    parser.add_argument('rep_dir', help='input directory where representative image files are placed. Note that a filename must have the format of [video name]_[%%M%%S] where %%M and %%S denote minute and second as decimal numbers, respectedly')
     parser.add_argument('video_dir', help='input directory where video files of chestnut fields are placed')
     parser.add_argument('background_dir', help='input directory where background video files are placed')
     parser.add_argument('labels', help='labels file')
