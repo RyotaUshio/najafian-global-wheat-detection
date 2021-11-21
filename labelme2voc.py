@@ -8,7 +8,7 @@ import os
 import os.path as osp
 import sys
 
-import imgviz
+# import imgviz
 import numpy as np
 
 import labelme
@@ -21,9 +21,9 @@ def main():
     parser.add_argument("input_dir", help="input annotated directory")
     parser.add_argument("output_dir", help="output dataset directory")
     parser.add_argument("--labels", help="labels file", required=True)
-    parser.add_argument(
-        "--noviz", help="no visualization", action="store_true"
-    )
+    # parser.add_argument(
+    #     "--noviz", help="no visualization", action="store_true"
+    # )
     args = parser.parse_args()
 
     if osp.exists(args.output_dir):
@@ -33,10 +33,10 @@ def main():
     os.makedirs(osp.join(args.output_dir, "JPEGImages"))
     os.makedirs(osp.join(args.output_dir, "SegmentationClass"))
     os.makedirs(osp.join(args.output_dir, "SegmentationClassPNG"))
-    if not args.noviz:
-        os.makedirs(
-            osp.join(args.output_dir, "SegmentationClassVisualization")
-        )
+    # if not args.noviz:
+    #     os.makedirs(
+    #         osp.join(args.output_dir, "SegmentationClassVisualization")
+    #     )
     print("Creating dataset:", args.output_dir)
 
     class_names = []
@@ -71,12 +71,12 @@ def main():
         out_png_file = osp.join(
             args.output_dir, "SegmentationClassPNG", base + ".png"
         )
-        if not args.noviz:
-            out_viz_file = osp.join(
-                args.output_dir,
-                "SegmentationClassVisualization",
-                base + ".jpg",
-            )
+        # if not args.noviz:
+        #     out_viz_file = osp.join(
+        #         args.output_dir,
+        #         "SegmentationClassVisualization",
+        #         base + ".jpg",
+        #     )
 
         with open(out_img_file, "wb") as f:
             f.write(label_file.imageData)
@@ -94,15 +94,15 @@ def main():
 
         np.save(out_lbl_file, lbl)
 
-        if not args.noviz:
-            viz = imgviz.label2rgb(
-                lbl,
-                imgviz.rgb2gray(img),
-                font_size=15,
-                label_names=class_names,
-                loc="rb",
-            )
-            imgviz.io.imsave(out_viz_file, viz)
+        # if not args.noviz:
+        #     viz = imgviz.label2rgb(
+        #         lbl,
+        #         imgviz.rgb2gray(img),
+        #         font_size=15,
+        #         label_names=class_names,
+        #         loc="rb",
+        #     )
+        #     imgviz.io.imsave(out_viz_file, viz)
 
 
 if __name__ == "__main__":
