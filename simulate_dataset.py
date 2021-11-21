@@ -10,6 +10,7 @@ import os
 import re
 import argparse
 import time
+from collections import OrderedDict
 
 _patterns = [
   re.compile(r'(.+)_(\d{4})_class(\d)\.(.+)'),
@@ -125,9 +126,16 @@ class foreground_obj:
             [self.centered_image, self.centered_mask_rgb]
           )
         )
-        # image = self._affine(self.centered_image)
-        # mask_rgb = self._affine(self.centered_mask_rgb)
-        return torch.where(mask_rgb, image, background)
+        result = torch.where(mask_rgb, image, background)
+        # bounding box info
+        [[left, top, right, bottom]] = torchvision.ops.masks_to_boxes(mask_rgb[[0]])
+        bbox = dict(
+          left=left.item(), 
+          right=right.item(), 
+          top=top.item(), 
+          bottom=bottom.item()
+        )
+        return result, bbox
         
     def argumented(self):
         """新しいオブジェクトを返すように！！"""
@@ -187,29 +195,62 @@ class set_foreground_obj:
         return ret
 
 
-def synthesize(frame, objs, classes, prob, output_name):
-    rng = np.random.default_rng()
-    
-    """nut(fine)
-    nut(empty)
-    burr
-    burr+nut
-    """
-    n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
+class yolo_label:
+  def __init__(self, image_width, image_height):
+    self.bboxes = []
+    self.image_width = image_width
+    self.image_height = image_height
 
+  def add(self, i_class: int, bbox: dict):
+    x_center = 0.5 * (bbox['left'] + bbox['right'])
+    y_center = 0.5 * (bbox['top'] + bbox['bottom'])
+    width = bbox['right'] - bbox['left']
+    height = bbox['bottom'] - bbox['top']
+
+    # normalize so that everything will be in [0, 1]
+    x_center /= self.image_width
+    y_center /= self.image_height
+    width /= self.image_width
+    height /= self.image_height
+
+    self.bboxes.append(
+      OrderedDict(
+        i_class=i_class, 
+        x_center=x_center,
+        y_center=y_center,
+        width=width,
+        height=height
+      )
+    )
+
+  def save(self, fname):
+    with open(fname, 'w') as f:
+      for label in self.bboxes:
+        row = ' '.join([str(value) for value in label.values()])
+        row += '\n'
+        f.write(row)
+
+
+
+def synthesize(frame, objs, classes, prob, width, height):
+    rng = np.random.default_rng()
+    n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
+    n_class = len(classes)
+    label = yolo_label(image_width=width, image_height=height)
     # frame = background_argumentation(frame)
 
     for i in range(n_obj):
         while True:
-          class_name = rng.choice(classes, p=prob)
+          i_class = rng.choice(range(n_class), p=prob)
+          class_name = classes[i_class]
           objects = objs[class_name]
           if objects:
             break
         obj = rng.choice(objects)
         # obj = obj.argumented() 
-        frame = obj.random_place(frame)
-        # torchvision.utils.save_image(synthesized, output_name)
-    return frame
+        frame, bbox = obj.random_place(frame)
+        label.add(i_class, bbox)
+    return frame, label
         
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -296,15 +337,27 @@ if __name__ == '__main__':
                 ret, frame = cap.read()
                 assert ret, f'Could not read {i_frame}-th frame from the background video {p_video} with {n_frame} frames'
                 frame = frame[:, :, [2, 1, 0]] # OpenCV reads image in (B, G, R(, A)) order
-                output_name = os.path.join(args.output_dir, f'images/back_{p_video.stem}_rep_{stem}{args.extension}')
-                frame = synthesize(
+                
+                
+
+                width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+
+                frame, label = synthesize(
                     frame=frame,
                     objs=obj_dict[stem],
                     classes=classes,
                     prob=prob,
-                    output_name=output_name
+                    width=width,
+                    height=height
                 )
-                save_image(frame, output_name)
+
+                # save as files
+                output_stem = f'back_{p_video.stem}_rep_{stem}'
+                output_image_name = os.path.join(p_output_images_dir, output_stem + args.extension)
+                output_label_name = os.path.join(p_output_labels_dir, output_stem + '.txt')
+                save_image(frame, output_image_name)
+                label.save(output_label_name)
 
         cap.release()
 
