@@ -332,7 +332,7 @@ if __name__ == '__main__':
                 size=n_sample_per_pair,
                 replace=False
             )
-            for i_frame in idx_frame:
+            for idx, i_frame in enumerate(idx_frame):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, i_frame)
                 ret, frame = cap.read()
                 assert ret, f'Could not read {i_frame}-th frame from the background video {p_video} with {n_frame} frames'
@@ -353,7 +353,7 @@ if __name__ == '__main__':
                 )
 
                 # save as files
-                output_stem = f'back_{p_video.stem}_rep_{stem}'
+                output_stem = f'back_{p_video.stem}_rep_{stem}_synthesized_{idx}'
                 output_image_name = os.path.join(p_output_images_dir, output_stem + args.extension)
                 output_label_name = os.path.join(p_output_labels_dir, output_stem + '.txt')
                 save_image(frame, output_image_name)
