@@ -174,7 +174,10 @@ def main():
     i = 0
     for p_mask in p_mask_dir.glob('*.npy'):
         p_image = get_image_path(p_mask=p_mask, p_rep_dir=p_rep_dir, extension=args.extension)
-        fgs = set_foreground_obj(p_image, p_mask, classes) # a set of foreground objects contained in p_image
+        objs = set_foreground_obj(p_image, p_mask, classes) # a set of foreground objects contained in p_image
+        for obj in objs:
+            obj.show(center=True)
+            plt.clf()
         
 if __name__ == '__main__':
     main()
