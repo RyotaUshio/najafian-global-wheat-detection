@@ -33,7 +33,10 @@ def get_image_path(p_mask, p_rep_dir, extension):
     return p_rep_dir / image_name
 
 def imread(fname):
-    return torchvision.io.read_image(fname)
+    return torchvision.io.read_image(
+      str(fname),
+      mode=torchvision.io.ImageReadMode.RGB
+    )
 
 def get_classes(p_labels):
     classes = []
@@ -78,14 +81,17 @@ class foreground_obj:
     def centerize(self, img):
         # move to the center
         center = torch.tensor([self.width, self.height]) * 0.5
-        translate = center - self.g
-        return torchvision.transforms.functional.affine(
-            img=img,
-            angle=0.0,
-            translate=translate,
-            scale=1.0,
-            shear=0
-        )
+        delta = center - self.g
+        delta_x, delta_y = delta.to(int).tolist()
+        return torch.roll(img, shifts=(delta_x, delta_y), dims=(-1, -2))
+
+        # return torchvision.transforms.functional.affine(
+        #     img=img,
+        #     angle=0.0,
+        #     translate=translate.tolist(),
+        #     scale=1.0,
+        #     shear=0
+        # )
 
     def random_place(self, background):
         """Randomly place the object on the given background image.
@@ -109,10 +115,11 @@ class foreground_obj:
     def show(self, center=False):
         mask = self.centered_mask_rgb if center else self.mask_rgb
         image = self.centered_image if center else self.image
-        masked_image = torch.where(mask, image, 255)
+        masked_image = torch.where(mask, image, torch.tensor(255, dtype=torch.uint8))
         masked_image = tensorimage_to_numpy(masked_image)
         plt.imshow(masked_image)
-        plt.scatter(*self.g, marker='x', color='r')
+        if not center:
+          plt.scatter(*self.g, marker='x', color='r')
     
 class set_foreground_obj:
     def __init__(self, image_path, mask_path, classes=None):
@@ -175,9 +182,11 @@ def main():
     for p_mask in p_mask_dir.glob('*.npy'):
         p_image = get_image_path(p_mask=p_mask, p_rep_dir=p_rep_dir, extension=args.extension)
         objs = set_foreground_obj(p_image, p_mask, classes) # a set of foreground objects contained in p_image
+      
         for obj in objs:
             obj.show(center=True)
-            plt.clf()
+            plt.show()
+            plt.pause(1)
         
 if __name__ == '__main__':
     main()
