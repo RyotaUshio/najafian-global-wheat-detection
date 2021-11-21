@@ -6,24 +6,37 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import pathlib
+import os
 import re
 import argparse
 import time
 
-_parse_fname_pattern = re.compile(r'(.+)_(\d{4})?(_class\d)?\.(.+)')
-_parse_fname_i_class_pattern = re.compile(r'_class(\d+)')
+_patterns = [
+  re.compile(r'(.+)_(\d{4})_class(\d)\.(.+)'),
+  re.compile(r'(.+)_(\d{4})(?!_class\d)\.(.+)'),
+  re.compile(r'(.+)\.(.+)')
+]
 
 def parse_fname(fname):
-    m = _parse_fname_pattern.match(fname)
-    if m is None:
-        raise Exception(f'An invalid file name "{fname}" was given')
-    ret = {k: v for k, v in zip(['stem', 'time', 'i_class', 'extension'], m.groups())}
+    for i, pattern in enumerate(_patterns):
+        m = pattern.match(fname)
+        if m:
+            break
+        if i == len(_patterns) - 1:
+            raise Exception(f'An invalid file name "{fname}" was given')
 
-    i_class = ret['i_class']
-    if i_class is not None:
-        i_class = _parse_fname_i_class_pattern.match(i_class).groups()[0]
-        i_class = int(i_class)
-        ret['i_class'] = i_class
+    ret = {k: None for k in ['stem', 'time', 'i_class', 'extension']}
+    
+    if i == 0:
+      keys = ['stem', 'time', 'i_class', 'extension']
+    elif i == 1:
+      keys = ['stem', 'time', 'extension']
+    elif i == 2:
+      keys = ['stem', 'extension']
+
+    ret.update({k: v for k, v in zip(keys, m.groups())})
+    if ret['i_class'] is not None:
+      ret['i_class'] = int(ret['i_class'])
 
     return ret
 
@@ -58,6 +71,12 @@ def imread(fname):
       str(fname),
       mode=torchvision.io.ImageReadMode.RGB
     )
+
+def save_image(tensor, fname):
+  if tensor.dtype == torch.uint8:
+    tensor = tensor.to(float)
+    tensor /= 255.0 
+  torchvision.utils.save_image(tensor, fname)
     
 
 class foreground_obj:
@@ -95,16 +114,24 @@ class foreground_obj:
         
         Parameters
         ----------
-        background: array
+        background: array or tensor
           An image on which the object is placed
         """
-        image = self._affine(self.centered_image)
-        mask = self._affine(self.centered_mask)
-        mask_rgb = maks_3_channels(mask)
+        if background.shape[-1] == 3:
+            background = background.transpose((-1, -3, -2))
+        background = torch.as_tensor(background)
+        image, mask_rgb = self._affine(
+          torch.stack(
+            [self.centered_image, self.centered_mask_rgb]
+          )
+        )
+        # image = self._affine(self.centered_image)
+        # mask_rgb = self._affine(self.centered_mask_rgb)
         return torch.where(mask_rgb, image, background)
         
-    def argument(self):
+    def argumented(self):
         """新しいオブジェクトを返すように！！"""
+        
         
     def make_bbox(self):
         pass
@@ -168,17 +195,21 @@ def synthesize(frame, objs, classes, prob, output_name):
     burr
     burr+nut
     """
-    n_obj = rng.normal(loc=6, scale=2) # ???
-    
+    n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
+
+    # frame = background_argumentation(frame)
+
     for i in range(n_obj):
-        class_name = rng.choice(classes, p=prob)
-        objects = objs[class_name]
+        while True:
+          class_name = rng.choice(classes, p=prob)
+          objects = objs[class_name]
+          if objects:
+            break
         obj = rng.choice(objects)
-        obj = obj.argumented()
-        frame = background_argumentation(frame)
-        synthesized = obj.random_place(frame)
-        torchvision.utils.save_image(synthesized, output_name)
-        
+        # obj = obj.argumented() 
+        frame = obj.random_place(frame)
+        # torchvision.utils.save_image(synthesized, output_name)
+    return frame
         
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -196,12 +227,18 @@ def parse_args():
         args.extension = '.' + args.extension
     return args
 
-def main():
+# def main():
+if __name__ == '__main__':
     args = parse_args()
     p_mask_dir = pathlib.Path(args.mask_dir)
     p_rep_dir = pathlib.Path(args.rep_dir)
     p_video_dir = pathlib.Path(args.video_dir)
     p_back_dir = pathlib.Path(args.background_dir)
+    p_output_dir = pathlib.Path(args.output_dir)
+    p_output_images_dir = p_output_dir / 'images'
+    p_output_labels_dir = p_output_dir / 'labels'
+    p_output_images_dir.mkdir(parents=True, exist_ok=True)
+    p_output_labels_dir.mkdir(parents=True, exist_ok=True)
     classes = get_classes(args.labels)
     n_class = len(classes)
 
@@ -210,14 +247,19 @@ def main():
         assert len(args.probability) == n_class
     else:
         args.probability = [1.0/n_class] * n_class
-    prob = np.array(args.probablity)
+    prob = np.array(args.probability)
     prob /= prob.sum()
+
+    # get the stems of representative frames
+    list_json = list(p_rep_dir.glob('*.json'))
+    json_stems = [parse_fname(json.name)['stem'] for json in list_json]
+    rep_stems = list(set(json_stems)) # get unique items
 
     # stem = filename - suffix : corresponds to each video clip with foreground objects
     stems = [parse_fname(p_video.name)['stem'] for p_video in p_video_dir.glob('*.mp4')]
     obj_dict = {
         stem: {class_name: [] for class_name in classes}
-        for stem in stems
+        for stem in rep_stems
     }
 
     # generate foreground objects and put them into obj_dict
@@ -228,49 +270,41 @@ def main():
 
     # simulate datasets for each pair of (a background video, set of foregound objects in a video)
     rng = np.random.default_rng()
-    p_back_generator = p_back_dir.glob('*.mp4')
-    n_back_video = len(list(p_back_generator))
+    n_back_video = len(list(p_back_dir.glob('*.mp4')))
     n_obj_video = len(stems)
     n_sample_per_pair = args.n_sample // (n_back_video * n_obj_video)
     n_sample_generated = 0
     
-    for p_video in p_back_generator:
+    for p_video in p_back_dir.glob('*.mp4'):
 
         # open background video
         cap = cv2.VideoCapture(str(p_video))
         if not cap.isOpened():
             raise Exception(f'Cannot open file {p_video}')
         n_frame = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        n_frame = int(n_frame)
         
-        for stem in stems:
+        for stem in rep_stems:
             # randomly select a background frame from p_video
             idx_frame = rng.choice(
                 range(n_frame),
-                size=n_sample_per_pair
+                size=n_sample_per_pair,
                 replace=False
             )
             for i_frame in idx_frame:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, i_frame)
                 ret, frame = cap.read()
                 assert ret, f'Could not read {i_frame}-th frame from the background video {p_video} with {n_frame} frames'
-                synthesize(
+                frame = frame[:, :, [2, 1, 0]] # OpenCV reads image in (B, G, R(, A)) order
+                output_name = os.path.join(args.output_dir, f'images/back_{p_video.stem}_rep_{stem}{args.extension}')
+                frame = synthesize(
                     frame=frame,
                     objs=obj_dict[stem],
                     classes=classes,
                     prob=prob,
-                    output_name=os.path.join(args.output_dir, f'back_{p_video.stem}_rep_{stem}{args.extension}')
+                    output_name=output_name
                 )
+                save_image(frame, output_name)
 
-
-    
-        
-        sec = cap.get(cv2.CAP_PROP_POS_MSEC) * 1000
-        
-        func(frame, sec, *args, **kwargs)
-    
-    cap.release()
-
-        
-if __name__ == '__main__':
-    main()
+        cap.release()
 
