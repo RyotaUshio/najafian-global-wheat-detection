@@ -359,5 +359,9 @@ if __name__ == '__main__':
                 save_image(frame, output_image_name)
                 label.save(output_label_name)
 
+                n_sample_generated += 1
+                if n_sample_generated % 100 == 0:
+                    print(f'{n_sample_generated}/{args.n_sample} = {n_sample_generated/args.n_sample*100}% completed')
+
         cap.release()
 
