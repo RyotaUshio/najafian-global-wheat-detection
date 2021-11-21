@@ -1,6 +1,0 @@
-__ignore__
-_background_
-nut(fine)
-nut(empty)
-burr
-burr+nut
