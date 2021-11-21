@@ -1,5 +1,7 @@
 import torch
 import torchvision
+import cv2
+import albumentations as A
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -32,12 +34,6 @@ def get_image_path(p_mask, p_rep_dir, extension):
     image_name = parsed['stem'] + '_' + parsed['time'] + extension
     return p_rep_dir / image_name
 
-def imread(fname):
-    return torchvision.io.read_image(
-      str(fname),
-      mode=torchvision.io.ImageReadMode.RGB
-    )
-
 def get_classes(p_labels):
     classes = []
     with open(p_labels) as f:
@@ -54,6 +50,17 @@ def tensorimage_to_numpy(tensor):
     """(C x H x W) to (H x W x C)
     """
     return tensor.numpy().transpose((1, 2, 0))
+
+from torchvision.transforms.functional import to_tensor
+
+def imread(fname):
+    return torchvision.io.read_image(
+      str(fname),
+      mode=torchvision.io.ImageReadMode.RGB
+    )
+
+def vidread(fname):
+  print()
 
 class foreground_obj:
     _affine = torchvision.transforms.RandomAffine(
@@ -84,14 +91,6 @@ class foreground_obj:
         delta = center - self.g
         delta_x, delta_y = delta.to(int).tolist()
         return torch.roll(img, shifts=(delta_x, delta_y), dims=(-1, -2))
-
-        # return torchvision.transforms.functional.affine(
-        #     img=img,
-        #     angle=0.0,
-        #     translate=translate.tolist(),
-        #     scale=1.0,
-        #     shear=0
-        # )
 
     def random_place(self, background):
         """Randomly place the object on the given background image.
@@ -187,6 +186,9 @@ def main():
             obj.show(center=True)
             plt.show()
             plt.pause(1)
+            i += 1
+        if i > 5:
+          break
         
 if __name__ == '__main__':
     main()
