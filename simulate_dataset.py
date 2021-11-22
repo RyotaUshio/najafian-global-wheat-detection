@@ -270,6 +270,8 @@ def parse_args():
 
 # def main():
 if __name__ == '__main__':
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    
     args = parse_args()
     p_mask_dir = pathlib.Path(args.mask_dir)
     p_rep_dir = pathlib.Path(args.rep_dir)
