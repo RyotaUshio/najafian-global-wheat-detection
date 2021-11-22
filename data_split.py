@@ -107,6 +107,15 @@ def main():
 
   # divide into (train+val) and test
   images = get_image_list(p_images_all)
+  if size_spec == 'abs':
+    n_image = args.train + args.test + args.val
+    n_image_all = len(images)
+    if n_image > n_image_all:
+      raise ValueError(
+        f'{args.train} + {args.test} + {args.val} = {n_image} exceeds the total number of images {n_image_all}')
+    elif n_image < n_image_all:
+      images = np.random.choice(images, size=n_image, replace=False)
+
   train_val, test = train_test_split(
     images, 
     test_size=args.test,
