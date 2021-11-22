@@ -154,8 +154,8 @@ def main():
         shutil.copy(p_image, p_images_division)
         shutil.copy(p_label, p_labels_division)
       elif args.move:
-        shutil.move(p_image, p_images_division)
-        shutil.move(p_label, p_labels_division)
+        shutil.move(str(p_image), str(p_images_division))
+        shutil.move(str(p_label), str(p_labels_division))
       if args.move or args.copy:
         p_image_after = p_images_division / image_name
       else:
