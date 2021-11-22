@@ -29,17 +29,20 @@ def parse_args():
   parser.add_argument(
     '--train', 
     help='number or proportion of samples in the training set',
-    type=float
+    type=float,
+    default=0.0
   )
   parser.add_argument(
     '--test', 
     help='number or proportion of samples in the test set',
-    type=float
+    type=float,
+    default=0.0
   )
   parser.add_argument(
     '--val', '--valid', 
     help='number or proportion of samples in the validation set',
-    type=float
+    type=float,
+    default=0.0
   )
   parser.add_argument(
     '-o', '--output',
@@ -63,8 +66,6 @@ def parse_args():
   args = parser.parse_args()
 
   sizes = [args.train, args.test, args.val]
-  if any([size is None for size in sizes]):
-    raise ValueError("--train, --test and --val are not optional")
   if all([size.is_integer() for size in sizes]):
     args.train, args.test, args.val = map(int, sizes)
     size_spec = 'abs'
@@ -95,6 +96,17 @@ def get_image_list(path):
     ret += list(path.glob(glob))
   return ret
 
+def random_split(seq, n_train, n_test, n_val):
+  rng = np.random.default_rng()
+  seq = seq[:n_train + n_test + n_val]
+  rng.shuffle(seq)
+  train, test, val = np.split(
+    seq, 
+    [n_train, n_train + n_test]
+  )
+  return train, test, val
+
+
 def main():
   args, size_spec = parse_args()
   p_root = pathlib.Path(args.path)
@@ -107,39 +119,26 @@ def main():
 
   # divide into (train+val) and test
   images = get_image_list(p_images_all)
+  n_image_all = len(images)
   if size_spec == 'abs':
     n_image = args.train + args.test + args.val
-    n_image_all = len(images)
     if n_image > n_image_all:
       raise ValueError(
         f'{args.train} + {args.test} + {args.val} = {n_image} exceeds the total number of images {n_image_all}')
-    elif n_image < n_image_all:
-      images = np.random.choice(images, size=n_image, replace=False)
 
-  train_val, test = train_test_split(
-    images, 
-    test_size=args.test,
-    train_size=args.train + args.val
-  )
-  
-  # divide (train+val) into train and val
+  # make sure args.train, args.test and args.val are absolute numbers, not proportions
   if size_spec == 'rel':
-    ratios = np.array([args.train, args.val])
-    ratios /= ratios.sum() # normalize
-    train, val = ratios
-  else:
-    train, val = args.train, args.val
+    args.train = int(n_image_all * args.train)
+    args.test = int(n_image_all * args.test)
+    args.val = n_image_all - args.train - args.test
 
-  train, val = train_test_split(
-    train_val,
-    test_size=args.val,
-    train_size=args.train
-  )
-
+  train, test, val = random_split(images, args.train, args.test, args.val)
   divisions = dict(train=train, test=test, val=val)
 
   # export 
   for name, division in divisions.items():
+    if division.size == 0:
+      continue
     if args.move or args.copy:
       p_images_division = p_out / 'images' / name
       p_labels_division = p_out / 'labels' / name
