@@ -31,7 +31,7 @@ def cfg_dataset(cfg):
             if p.is_dir():
                 cfg_dataset_internal(p, cfg, text=False)
 
-    assert any([name in cfg for name in ['train', 'val', 'test']])
+    assert all([name in cfg for name in ['train', 'val']])
 
 def cfg_dataset_internal(path: pathlib.Path, cfg: dict, text: bool) -> None:
     names = ['train', 'val', 'test']
