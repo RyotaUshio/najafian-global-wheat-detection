@@ -268,8 +268,7 @@ def parse_args():
         args.extension = '.' + args.extension
     return args
 
-# def main():
-if __name__ == '__main__':
+def main():
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     
     args = parse_args()
@@ -367,3 +366,5 @@ if __name__ == '__main__':
 
         cap.release()
 
+if __name__ == '__main__':
+    main()
