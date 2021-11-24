@@ -299,7 +299,7 @@ if __name__ == '__main__':
     p_output_images_dir = p_output_dir / 'images/all'
     p_output_labels_dir = p_output_dir / 'labels/all'        
     p_output_images_dir.mkdir(parents=True, exist_ok=True)
-    p_output_labels_dir.mkdir(exist_ok=True)
+    p_output_labels_dir.mkdir(parents=True, exist_ok=True)
 
     if args.bbox:
         p_output_labeled_images_dir = p_output_dir / 'labeled_images'
