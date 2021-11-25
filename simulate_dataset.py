@@ -6,6 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import pathlib
+import os
+import errno
 import re
 import argparse
 import dataclasses
@@ -241,13 +243,13 @@ class yolo_label:
       return [classes[bbox['i_class']] for bbox in self.bboxes]
 
 
-def synthesize(frame, objs, classes, prob, width, height):
+def synthesize(frame, objs, classes, prob):
     """randomly place foreground objects onto the given frame in-place
     """
     rng = np.random.default_rng()
     n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
     n_class = len(classes)
-    label = yolo_label(image_width=width, image_height=height)
+    label = yolo_label(image_width=frame.size(2), image_height=frame.size(1))
     # frame = background_argumentation(frame)
 
     for i in range(n_obj):
@@ -284,6 +286,10 @@ def parse_args():
         args_dict = vars(args)
         for key in ['mask_dir', 'rep_dir', 'video_dir', 'background_dir', 'output_dir', 'labels']:
             args_dict[key] = args.root / args_dict[key]
+            if key in ['mask_dir', 'rep_dir', 'video_dir', 'background_dir']:
+                print(key, args_dict[key], args_dict[key].exists)
+                if not args_dict[key].exists():
+                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
     return args
 
 if __name__ == '__main__':
@@ -342,7 +348,7 @@ if __name__ == '__main__':
     rng = np.random.default_rng()
     n_back_video = len(list(p_back_dir.glob('*.mp4')))
     n_obj_video = len(stems)
-    n_sample_per_pair = args.n_sample // (n_back_video * n_obj_video)
+    n_sample_per_pair = max(1, args.n_sample // (n_back_video * n_obj_video))
     n_sample_generated = 0
 
     if args.verbose:
@@ -380,16 +386,11 @@ if __name__ == '__main__':
                         print('Something went wrong while reading frames from a video:')
                         print(e)
 
-                    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-
                     frame, label = synthesize(
                         frame=frame,
                         objs=obj_dict[stem],
                         classes=classes,
-                        prob=prob,
-                        width=width,
-                        height=height
+                        prob=prob
                     )
 
                     # save as files
