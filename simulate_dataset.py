@@ -63,8 +63,6 @@ def tensorimage_to_numpy(tensor):
     """
     return tensor.numpy().transpose((1, 2, 0))
 
-from torchvision.transforms.functional import to_tensor
-
 def imread(fname):
     return torchvision.io.read_image(
       str(fname),
