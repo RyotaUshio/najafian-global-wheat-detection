@@ -81,36 +81,56 @@ def save_image(tensor, fname):
         tensor = tensor.float()
         tensor /= 255.0
     torchvision.utils.save_image(tensor, fname)
+
+def save_labeled_image(image, label, output_labeled_image_name):
+    save_image(
+        torchvision.utils.draw_bounding_boxes(
+            image=image.cpu(),
+            boxes=label.to_tensor(),
+            labels=label.class_name_list(classes)
+        ),
+        output_labeled_image_name,
+    )    
   
-def get_bbox(mask):
-    if mask.ndim <= 2:
-        mask = torch.unsqueeze(mask, 0)
-    [[left, top, right, bottom]] = torchvision.ops.masks_to_boxes(mask).to(int)
-    return dict(
-        left=left.item(), 
-        right=right.item(), 
-        top=top.item(), 
-        bottom=bottom.item()
-    )
+def get_bbox(masks):
+    if masks.ndim <= 2:
+        masks = torch.unsqueeze(masks, 0)
+
+    boxes = torchvision.ops.masks_to_boxes(masks).to(int)
+    ret = []
+    for box in boxes:
+        left, top, right, bottom = box
+        ret.append(dict(left=left.item(), right=right.item(), top=top.item(), bottom=bottom.item()))
+    if len(ret) == 1:
+        ret = ret[0]
+    return ret
 
 def make_classwise_mask(p_mask, n_class):
     """p_mask: path to .npy file which contains class-wise masks in the VOC format
     """
     labels = torch.as_tensor(np.load(p_mask))
-    ret = dict()
+    # ret = dict()
+    masks = []
     for i_class in range(n_class):
-        classwise_label = (labels == i_class + 1)
-        ret.update({i_class: classwise_label})
-    return ret
+        classwise_mask = (labels == i_class + 1)
+        # ret.update({i_class: classwise_mask})
+        masks.append(classwise_mask)
+    # return ret
+    return torch.stack(masks)
 
 def make_objectwise_mask(classwise_masks, n_class):
+    """classwise_masks: tensor of shape n_class x H x W (stack of masks)
+    """
     ret = dict()
+    # masks = []
     for i_class in range(n_class):
-        objectwise_labels = skimage.measure.label(classwise_masks[i_class]) # labels connected components
-        object_id = np.unique(objectwise_labels)[1:] # ignore background = 0
-        masks = (objectwise_labels == object_id.reshape(-1, 1, 1))
-        ret.update({i_class: torch.as_tensor(masks)})
+        objectwise_masks = skimage.measure.label(classwise_masks[i_class]) # labels connected components
+        object_id = np.unique(objectwise_masks)[1:] # ignore background = 0
+        objectwise_masks = (objectwise_masks == object_id.reshape(-1, 1, 1))
+        ret.update({i_class: torch.as_tensor(objectwise_masks)})
+        # masks.append(torch.as_tensor(objectwise_masks))
     return ret
+    # return torch.stack(masks)
     
 @dataclasses.dataclass
 class foreground_obj:
@@ -146,10 +166,11 @@ class foreground_obj:
         background: array or tensor
           An image on which the object is placed
         """
-        if background.shape[-1] == 3:
-            background = background.transpose((-1, -3, -2))
-
-        rotated = self._random_rotate(torch.cat([self.image_cropped, torch.unsqueeze(self.mask_cropped, 0)]))
+        rotated = self._random_rotate(
+            torch.cat(
+                [self.image_cropped, torch.unsqueeze(self.mask_cropped, 0)]
+            )
+        )
         image_cropped, mask_cropped = torch.split(rotated, [3, 1], dim=0)
         mask_cropped = torch.squeeze(mask_cropped, dim=0).to(torch.bool)
         _, h, w = image_cropped.size() # size of cropped region after rotation
@@ -181,9 +202,9 @@ class foreground_obj:
         classwise_mask = make_classwise_mask(p_mask, n_class)
         objectwise_mask = make_objectwise_mask(classwise_mask, n_class)
         if device is not None:
-            for dic in [classwise_mask, objectwise_mask]:
-                for k, v in dic.items():
-                    dic.update({k: v.to(device)})
+            classwise_mask = classwise_mask.to(device)
+            for i_class, masks in objectwise_mask.items():
+                objectwise_mask.update({i_class: masks.to(device)})
         image = read_image(p_image, device)
 
         parsed = parse_fname(p_mask)
@@ -215,11 +236,11 @@ class foreground_obj:
         return return_type(objects, classwise_mask, objectwise_mask)
 
 class yolo_label:
-  def __init__(self, image_width, image_height):
+  def __init__(self, image):
     self.bboxes = []
-    self.image_width = image_width
-    self.image_height = image_height
-    self.dicts =  []
+    self.image_width = float(image.size(-1))
+    self.image_height = float(image.size(-2))
+    self.dicts = []
 
   def add(self, i_class: int, bbox: dict):
     x_center = 0.5 * (bbox['left'] + bbox['right'])
@@ -264,7 +285,7 @@ def synthesize(frame, objs, classes, prob):
     rng = np.random.default_rng()
     n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
     n_class = len(classes)
-    label = yolo_label(image_width=frame.size(2), image_height=frame.size(1))
+    label = yolo_label(frame)
     # frame = background_argumentation(frame)
 
     for i in range(n_obj):
@@ -276,28 +297,136 @@ def synthesize(frame, objs, classes, prob):
         obj = rng.choice(objects)
         # obj = obj.argumented() 
         bbox = obj.random_place(frame)
-        label.add(i_class, bbox)
+        label.add(i_class=i_class, bbox=bbox)
     return frame, label
 
-def domain_adaptation1(rep_image, objects):
-    pass
+def generate_rotated_rep_images(p_image, classwise_mask, *, p_output_dir, n_class, device, bbox, counter):
+    image = read_image(p_image)
+    concat = torch.cat(
+        [image, classwise_mask]
+    ).to(device)
+    
+    p_output_images_dir = p_output_dir / 'images/all'
+    p_output_labels_dir = p_output_dir / 'labels/all'
+    p_output_images_dir.mkdir(parents=True, exist_ok=True)
+    p_output_labels_dir.mkdir(parents=True, exist_ok=True)
+    if bbox:
+        p_output_labeled_images_dir = p_output_dir / 'labeled_images'
+        p_output_labeled_images_dir.mkdir(parents=True, exist_ok=True)
+
+    for degree in range(360):
+        image, label = _generate_rotated_rep_images_impl(concat, degree=degree, n_class=n_class)
+        output_stem = f'{p_image.stem}_{degree:03}'
+        output_image_name = p_output_images_dir / (output_stem + p_image.suffix)
+        output_label_name = p_output_labels_dir / (output_stem + '.txt')
+        save_image(image, output_image_name)
+        label.save(output_label_name)
+        if bbox:
+            output_labeled_image_name = p_output_labeled_images_dir / (output_stem + args.extension)
+            save_labeled_image(frame, label, output_labeled_image_name)
+        counter()
+            
+def _generate_rotated_rep_images_impl(concat, *, degree, n_class):
+    """image: Tensor (C, H, W)
+    classwise_mask: Tensor (n_class, H, W)
+    """
+    rotated = torchvision.transforms.functional.rotate(
+        concat, degree
+    )
+    image, classwise_mask = torch.split(rotated, [3, n_class], dim=0)
+    objectwise_mask = make_objectwise_mask(classwise_mask, n_class)
+    label = yolo_label(image)
+        
+    # bounding box info
+    for i_class in range(n_class):
+        bboxes = get_bbox(objectwise_mask[i_class])
+        for bbox in bboxes:
+            label.add(i_class=i_class, bbox=bbox)
+
+    return image, label
 
         
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', help='root directory of the project (optional). if given, all other pathes are assumed to be relative to the root.', type=pathlib.Path)
-    parser.add_argument('--mask', help='[required] input directory where VOC mask files named [image_name].npy are placed', type=pathlib.Path, required=True)
-    parser.add_argument('--rep', help='[required] input directory where representative image files are placed. Note that a filename must have the format of [video name]_[%%M%%S] where %%M and %%S denote minute and second as decimal numbers, respectedly', type=pathlib.Path, required=True)
-    parser.add_argument('--video', help='[required] input directory where video files of chestnut fields are placed', type=pathlib.Path, required=True)
-    parser.add_argument('--back', '--background', help='[required] input directory where background video files are placed', type=pathlib.Path, required=True)
-    parser.add_argument('-o', '--output', help='[required] output directory where generated dataset will be exported. Note that two directories will be made under the output_dir, namely "images" and "labels"', type=pathlib.Path, required=True)
-    parser.add_argument('--labels', help='[required] path to the labels file', type=pathlib.Path, required=True)
-    parser.add_argument('-n', '--n-sample', help='[required] number of samples of the dataset that will be generated synthetically', type=int, required=True)
-    parser.add_argument('-p', '--probability', '--prob', help='probability that a foreground object is chosen from each class when synthesizving dataset. This must have the same length as number of classes. Defaults to [1/n_class, 1/n_class, ...]', nargs='*', type=float)
-    parser.add_argument('-e', '--extension', help='extension(s) of image files', nargs='?', default='.png')
-    parser.add_argument('-v', '--verbose', help='When specified, display the progress and time remaining', action='store_true')
-    parser.add_argument('-b', '--bbox', help='When specified, images with calculated bounding boxes are also saved', action='store_true')
-    parser.add_argument('-c', '--cuda', help='When specified, try to use cuda if available', action='store_true')
+    parser.add_argument(
+        '--root', 
+        help='root directory of the project (optional). if given, all other pathes are assumed to be relative to the root.', 
+        type=pathlib.Path
+    )
+    parser.add_argument(
+        '--mask', 
+        help='[required] input directory where VOC mask files named [image_name].npy are placed', 
+        type=pathlib.Path, 
+        required=True
+    )
+    parser.add_argument(
+        '--rep', 
+        help='[required] input directory where representative image files are placed. Note that a filename must have the format of [video name]_[%%M%%S] where %%M and %%S denote minute and second as decimal numbers, respectedly', 
+        type=pathlib.Path, 
+        required=True
+    )
+    parser.add_argument(
+        '--video', 
+        help='[required] input directory where video files of chestnut fields are placed', 
+        type=pathlib.Path, 
+        required=True
+    )
+    parser.add_argument(
+        '--back', '--background', 
+        help='[required] input directory where background video files are placed', 
+        type=pathlib.Path, 
+        required=True
+    )
+    parser.add_argument(
+        '-o', '--output', 
+        help='[required] output directory where generated dataset will be exported. Note that two directories will be made under the output_dir, namely "images" and "labels"', 
+        type=pathlib.Path, 
+        required=True
+    )
+    parser.add_argument(
+        '--labels', 
+        help='[required] path to the labels file', 
+        type=pathlib.Path, 
+        required=True
+    )
+    parser.add_argument(
+        '-n', '--n-sample', 
+        help='[required] number of samples of the dataset that will be generated synthetically', 
+        type=int, 
+        required=True
+    )
+    parser.add_argument(
+        '-p', '--probability', '--prob', 
+        help='probability that a foreground object is chosen from each class when synthesizving dataset. This must have the same length as number of classes. Defaults to [1/n_class, 1/n_class, ...]', 
+        nargs='*', 
+        type=float
+    )
+    parser.add_argument(
+        '-e', '--extension', 
+        help='extension(s) of image files', 
+        nargs='?', 
+        default='.png'
+    )
+    parser.add_argument(
+        '-v', '--verbose', 
+        help='When specified, display the progress and time remaining', 
+        action='store_true'
+    )
+    parser.add_argument(
+        '-b', '--bbox', 
+        help='When specified, images with calculated bounding boxes are also saved', 
+        action='store_true'
+    )
+    parser.add_argument(
+        '-c', '--cuda', 
+        help='When specified, try to use cuda if available', 
+        action='store_true'
+    )
+    parser.add_argument(
+        '-d', '--domain-adaptation', 
+        help='output directory where images & labels for the first step of domain adaptation are placed (generated only if this flag is passed)',
+        type=pathlib.Path
+    )
 
     args = parser.parse_args()
     if not args.extension.startswith('.'):
@@ -311,13 +440,43 @@ def parse_args():
                     raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
     return args
 
+def make_counter(*, n_total, fmt, verbose, newline):
+    i = 0
+    t0 = time.time()
+    def counter(*args, **kwargs):
+        nonlocal i
+        nonlocal t0
+        nonlocal n_total
+        nonlocal verbose
+        nonlocal newline
+        i += 1
+        time_elapsed = time.time() - t0
+        velocity = i / time_elapsed
+        time_remaining = (n_total - i) / velocity
+        if verbose:
+            end = '\n' if newline else '\r'
+            string = fmt(i, n_total, time_elapsed, time_remaining, *args, **kwargs)
+            #if not newline:
+            #    string += '\r'
+            print(string, end=end)
+        if i >= n_total:
+            raise StopIteration
+    return counter
+
+def make_logger(*, verbose):
+    def log(*args, **kwargs):
+        nonlocal verbose
+        if verbose:
+            print(*args, **kwargs)
+    return log
+
 if __name__ == '__main__':
     args = parse_args()
-    
     device = 'cuda' if args.cuda and torch.cuda.is_available() else 'cpu'
-    if args.verbose:
-        print(f'using {device} device')
-        print('making output directories...', end='')
+    logger = make_logger(verbose=args.verbose)
+    
+    logger(f'using {device} device')
+    logger('making output directories...', end='')
     
     p_mask_dir = args.mask
     p_rep_dir = args.rep
@@ -333,19 +492,17 @@ if __name__ == '__main__':
         p_output_labeled_images_dir = p_output_dir / 'labeled_images'
         p_output_labeled_images_dir.mkdir(exist_ok=True)
 
-    if args.verbose:
-        print('done')
-        print('getting class information...', end='')
+    logger('done')
+    logger('getting class information...', end='')
     
     classes = get_classes(args.labels)
     n_class = len(classes)
 
-    if args.verbose:
-        print('done')
+    logger('done')
 
     # class probabilities
     if args.probability:
-        assert len(args.probability) == n_class
+        assert len(args.probability) == n_class, 'n_probability must be equal to n_class'
     else:
         args.probability = [1.0/n_class] * n_class
     prob = np.array(args.probability)
@@ -364,8 +521,7 @@ if __name__ == '__main__':
     }
 
     # generate foreground objects and put them into obj_dict
-    if args.verbose:
-        print('constructing foreground objects...', end='')
+    logger('constructing foreground objects...', end='')
 
     classwise_masks = dict()
     for p_mask in p_mask_dir.glob('*.npy'):
@@ -374,106 +530,107 @@ if __name__ == '__main__':
         objects, classwise_mask, objectwise_mask = foreground_obj.from_voc(p_image, p_mask, classes, device) # a list of foreground objects contained in p_image
         for i_class in range(n_class):
             obj_dict[stem][i_class].extend(objects[i_class])
-        classwise_masks.update({p_mask: classwise_mask})
-    if args.verbose:
-        print('done')
+        classwise_masks.update({p_mask.stem: classwise_mask})
+    logger('done')
 
     # simulate datasets for each pair of (a background video, set of foregound objects in a video)
     rng = np.random.default_rng()
     n_back_video = len(list(p_back_dir.glob('*.mp4')))
     n_obj_video = len(stems)
     n_sample_per_pair = max(1, args.n_sample // (n_back_video * n_obj_video))
-    n_sample_generated = 0
 
-    if args.verbose:
-        print('synthesizing dataset...')
+    logger('synthesizing dataset...')
     
     t0 = time.time()
     counts = dict()
     finished = False
 
-    while True:
-        for p_video in p_back_dir.glob('*.mp4'):
+    fmt = lambda n_sample_generated, n_sample, time_elapsed, time_remaining: (
+        f'  {n_sample_generated}/{n_sample} = {n_sample_generated/n_sample*100:.1f}% completed. '
+        f'About {time.strftime("%Hh %Mmin", time.gmtime(time_remaining + 30))} left. '
+        f'({time_elapsed / n_sample_generated:.2f} sec per sample)'
+    )
+    counter = make_counter(
+        n_total=args.n_sample,
+        fmt=fmt,
+        verbose=args.verbose, 
+        newline=False
+    )
 
-            # open background video
-            cap = cv2.VideoCapture(str(p_video))
-            if not cap.isOpened():
-                raise Exception(f'Cannot open file {p_video}')
-            n_frame = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            n_frame = int(n_frame)
-            if p_video not in counts:
-                counts[p_video] = {}
+    try:
+        while True:
+            for p_video in p_back_dir.glob('*.mp4'):
+
+                # open background video
+                cap = cv2.VideoCapture(str(p_video))
+                if not cap.isOpened():
+                    raise Exception(f'Cannot open file {p_video}')
+                n_frame = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                n_frame = int(n_frame)
+                if p_video not in counts:
+                    counts[p_video] = {}
             
-            for stem in rep_stems:
+                for stem in rep_stems:
 
-                if stem not in counts[p_video]:
-                    counts[p_video][stem] = 0
-                else:
-                    counts[p_video][stem] += 1
+                    if stem not in counts[p_video]:
+                        counts[p_video][stem] = 0
+                    else:
+                        counts[p_video][stem] += 1
                 
-                for _ in range(n_sample_per_pair):
-                    # randomly select a background frame from p_video
-                    i_frame = rng.choice(n_frame)
-                    while True:
-                        try:
-                            frame = read_frame(cap, i_frame, device)
-                        except RuntimeError as e:
-                            print('Something went wrong while reading frames from a video:')
-                            print(e)
-                        else:
-                            break
+                    for _ in range(n_sample_per_pair):
+                        # randomly select a background frame from p_video
+                        i_frame = rng.choice(n_frame)
+                        while True:
+                            try:
+                                frame = read_frame(cap, i_frame, device)
+                            except RuntimeError as e:
+                                print('Something went wrong while reading frames from a video:')
+                                print(e)
+                            else:
+                                break
 
-                    frame, label = synthesize(
-                        frame=frame,
-                        objs=obj_dict[stem],
-                        classes=classes,
-                        prob=prob
+                        frame, label = synthesize(
+                            frame=frame,
+                            objs=obj_dict[stem],
+                            classes=classes,
+                            prob=prob
+                        )
+
+                        # save as files
+                        output_stem = f'back_{p_video.stem}_rep_{stem}_synthesized_{counts[p_video][stem]}'
+                        output_image_name = p_output_images_dir / (output_stem + args.extension)
+                        output_label_name = p_output_labels_dir / (output_stem + '.txt')
+                        save_image(frame, output_image_name)
+                        label.save(output_label_name)
+
+                        if args.bbox:
+                            output_labeled_image_name = p_output_labeled_images_dir / (output_stem + args.extension)
+                            save_labeled_image(frame, label, output_labeled_image_name)
+
+                        counter()
+
+    except StopIteration:
+        logger('\ndone')
+
+    if args.domain_adaptation is not None:
+        logger('generating images & labels for the first step of domain adaptation...')
+        n_rep = len(list_json)
+        try:
+            for p_json in list_json:
+                p_image = p_rep_dir / (p_json.stem + args.extension)
+                generate_rotated_rep_images(
+                    p_image, 
+                    classwise_masks[p_image.stem], 
+                    p_output_dir=args.domain_adaptation, 
+                    n_class=n_class, 
+                    device=device,
+                    bbox=args.bbox,
+                    counter=make_counter(
+                        n_total=n_rep * 360,
+                        fmt=fmt,
+                        verbose=args.verbose, 
+                        newline=False
                     )
-
-                    # save as files
-                    output_stem = f'back_{p_video.stem}_rep_{stem}_synthesized_{counts[p_video][stem]}'
-                    output_image_name = p_output_images_dir / (output_stem + args.extension)
-                    output_label_name = p_output_labels_dir / (output_stem + '.txt')
-                    save_image(frame, output_image_name)
-                    label.save(output_label_name)
-
-                    if args.bbox:
-                        output_labeled_image_name = p_output_labeled_images_dir / (output_stem + args.extension)
-                        save_image(
-                            torchvision.utils.draw_bounding_boxes(
-                                image=frame.cpu(),
-                                boxes=label.to_tensor(),
-                                labels=label.class_name_list(classes)
-                            ),
-                            output_labeled_image_name,
-                        )
-
-                    n_sample_generated += 1
-
-                    if args.verbose:
-                        time_elapsed = time.time() - t0
-                        velo = n_sample_generated / time_elapsed
-                        time_remaining = (args.n_sample - n_sample_generated) / velo
-                        print(
-                            f'  {n_sample_generated}/{args.n_sample} = {n_sample_generated/args.n_sample*100:.1f}% completed. '
-                            f'About {time.strftime("%Hh %Mmin", time.gmtime(time_remaining + 30))} left. ',
-                            f'({time_elapsed / n_sample_generated: .2f} sec per sample)',
-                            end='\r'
-                        )
-
-                    if n_sample_generated >= args.n_sample:
-                        finished = True
-                        break
-
-                if finished:
-                    break
-
-            if finished:
-                break
-
-        if finished:
-            break
-
-    if args.verbose:
-        print('\ndone')
-
+                )
+        except StopIteration:
+            logger('\ndone')
