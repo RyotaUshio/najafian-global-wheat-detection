@@ -3,8 +3,6 @@ import torchvision
 import cv2
 import albumentations as A
 import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image
 import pathlib
 import os
 import errno
@@ -287,15 +285,17 @@ def parse_args():
         for key in ['mask_dir', 'rep_dir', 'video_dir', 'background_dir', 'output_dir', 'labels']:
             args_dict[key] = args.root / args_dict[key]
             if key in ['mask_dir', 'rep_dir', 'video_dir', 'background_dir']:
-                print(key, args_dict[key], args_dict[key].exists)
                 if not args_dict[key].exists():
                     raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
     return args
 
 if __name__ == '__main__':
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+     # device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     
     args = parse_args()
+
+    if args.verbose:
+        print('making output directories...', end='')
     
     p_mask_dir = args.mask_dir
     p_rep_dir = args.rep_dir
@@ -310,9 +310,16 @@ if __name__ == '__main__':
     if args.bbox:
         p_output_labeled_images_dir = p_output_dir / 'labeled_images'
         p_output_labeled_images_dir.mkdir(exist_ok=True)
+
+    if args.verbose:
+        print('done')
+        print('getting class information...', end='')
     
     classes = get_classes(args.labels)
     n_class = len(classes)
+
+    if args.verbose:
+        print('done')
 
     # class probabilities
     if args.probability:
@@ -412,9 +419,6 @@ if __name__ == '__main__':
                         )
 
                     n_sample_generated += 1
-                    if n_sample_generated >= args.n_sample:
-                        finished = True
-                        break
 
                     if args.verbose:
                         time_elapsed = time.time() - t0
@@ -426,7 +430,8 @@ if __name__ == '__main__':
                             end=''
                         )
 
-                    if finished:
+                    if n_sample_generated >= args.n_sample:
+                        finished = True
                         break
 
                 if finished:
