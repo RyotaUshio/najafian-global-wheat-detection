@@ -300,7 +300,7 @@ def synthesize(frame, objs, classes, prob):
         label.add(i_class=i_class, bbox=bbox)
     return frame, label
 
-def generate_rotated_rep_images(p_image, classwise_mask, *, p_output_dir, n_class, device, bbox, counter):
+def generate_rotated_rep_image(p_image, classwise_mask, *, p_output_dir, n_class, device, bbox, counter):
     image = read_image(p_image)
     concat = torch.cat(
         [image, classwise_mask]
@@ -315,7 +315,7 @@ def generate_rotated_rep_images(p_image, classwise_mask, *, p_output_dir, n_clas
         p_output_labeled_images_dir.mkdir(parents=True, exist_ok=True)
 
     for degree in range(360):
-        image, label = _generate_rotated_rep_images_impl(concat, degree=degree, n_class=n_class)
+        image, label = _generate_rotated_rep_image_impl(concat, degree=degree, n_class=n_class)
         output_stem = f'{p_image.stem}_{degree:03}'
         output_image_name = p_output_images_dir / (output_stem + p_image.suffix)
         output_label_name = p_output_labels_dir / (output_stem + '.txt')
@@ -326,7 +326,7 @@ def generate_rotated_rep_images(p_image, classwise_mask, *, p_output_dir, n_clas
             save_labeled_image(frame, label, output_labeled_image_name)
         counter()
             
-def _generate_rotated_rep_images_impl(concat, *, degree, n_class):
+def _generate_rotated_rep_image_impl(concat, *, degree, n_class):
     """image: Tensor (C, H, W)
     classwise_mask: Tensor (n_class, H, W)
     """
@@ -615,22 +615,23 @@ if __name__ == '__main__':
     if args.domain_adaptation is not None:
         logger('generating images & labels for the first step of domain adaptation...')
         n_rep = len(list_json)
+        counter = make_counter(
+            n_total=n_rep * 360,
+            fmt=fmt,
+            verbose=args.verbose, 
+            newline=False
+        )
         try:
             for p_json in list_json:
                 p_image = p_rep_dir / (p_json.stem + args.extension)
-                generate_rotated_rep_images(
+                generate_rotated_rep_image(
                     p_image, 
                     classwise_masks[p_image.stem], 
                     p_output_dir=args.domain_adaptation, 
                     n_class=n_class, 
                     device=device,
                     bbox=args.bbox,
-                    counter=make_counter(
-                        n_total=n_rep * 360,
-                        fmt=fmt,
-                        verbose=args.verbose, 
-                        newline=False
-                    )
+                    counter=counter
                 )
         except StopIteration:
             logger('\ndone')
