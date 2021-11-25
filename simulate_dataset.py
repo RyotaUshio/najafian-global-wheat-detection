@@ -63,15 +63,16 @@ def tensorimage_to_numpy(tensor):
     """
     return tensor.numpy().transpose((1, 2, 0))
 
-def imread(fname):
+def read_mask(path, device):
+    return torch.as_tensor(np.load(path)).to(device)
+
+def read_image(path, device):
     return torchvision.io.read_image(
-      str(fname),
+      str(path),
       mode=torchvision.io.ImageReadMode.RGB
-    )
+    ).to(device)
 
-read_image = imread
-
-def read_frame(cap, i_frame):
+def read_frame(cap, i_frame, device):
     cap.set(cv2.CAP_PROP_POS_FRAMES, i_frame)
     opened, frame = cap.read()
     if not opened:
@@ -79,10 +80,11 @@ def read_frame(cap, i_frame):
     frame = frame[:, :, [2, 1, 0]] # OpenCV reads image in (B, G, R(, A)) order
     frame = frame.transpose((2, 0, 1)) # (H, W, C) -> (C, H, W)
     frame = torch.as_tensor(frame)
-    return frame
+    return frame.to(device)
     
 
 def save_image(tensor, fname):
+    tensor = tensor.cpu()
     if isinstance(tensor, torch.ByteTensor):
         tensor = tensor.float()
         tensor /= 255.0
@@ -174,8 +176,8 @@ class foreground_obj:
         extension = parsed['extension'] # extension of image file e.g. 'png', 'jpeg', etc.
 
         # read mask & image files
-        masks = torch.as_tensor(np.load(mask_path))
-        image = imread(image_path)
+        masks = read_mask(mask_path, device)
+        image = read_image(image_path, device)
 
         objects = []
         for mask in masks:
@@ -273,8 +275,9 @@ def parse_args():
     parser.add_argument('n_sample', help='number of samples of the dataset that will be generated synthetically', type=int)
     parser.add_argument('-p', '--probability', help='probability that a foreground object is chosen from each class when synthesizving dataset. This must have the same length as number of classes. Defaults to [1/n_class, 1/n_class, ...]', nargs='*', type=float)
     parser.add_argument('-e', '--extension', help='extension(s) of image files', nargs='?', default='.png')
-    parser.add_argument('-v', '--verbose', help='if specified, display the progress and time remaining', action='store_true')
-    parser.add_argument('-b', '--bbox', help='if specified, images with calculated bounding boxes are also saved', action='store_true')
+    parser.add_argument('-v', '--verbose', help='When specified, display the progress and time remaining', action='store_true')
+    parser.add_argument('-b', '--bbox', help='When specified, images with calculated bounding boxes are also saved', action='store_true')
+    parser.add_argument('-c', '--cuda', help='When specified, try to use cuda if available', action='store_true')
     args = parser.parse_args()
     if not args.extension.startswith('.'):
         args.extension = '.' + args.extension
@@ -288,11 +291,11 @@ def parse_args():
     return args
 
 if __name__ == '__main__':
-     # device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    
     args = parse_args()
-
+    
+    device = 'cuda' if args.cuda and torch.cuda.is_available() else 'cpu'
     if args.verbose:
+        print(f'using {device} device')
         print('making output directories...', end='')
     
     p_mask_dir = args.mask_dir
@@ -386,7 +389,7 @@ if __name__ == '__main__':
                     # randomly select a background frame from p_video
                     i_frame = rng.choice(n_frame)
                     try:
-                        frame = read_frame(cap, i_frame)
+                        frame = read_frame(cap, i_frame, device)
                     except RuntimeError as e:
                         print('Something went wrong while reading frames from a video:')
                         print(e)
@@ -409,7 +412,7 @@ if __name__ == '__main__':
                         output_labeled_image_name = p_output_labeled_images_dir / (output_stem + args.extension)
                         save_image(
                             torchvision.utils.draw_bounding_boxes(
-                                image=frame,
+                                image=frame.cpu(),
                                 boxes=label.to_tensor(),
                                 labels=label.class_name_list(classes)
                             ),
@@ -424,8 +427,9 @@ if __name__ == '__main__':
                         time_remaining = (args.n_sample - n_sample_generated) / velo
                         print(
                             f'  {n_sample_generated}/{args.n_sample} = {n_sample_generated/args.n_sample*100:.1f}% completed. '
-                            f'About {time.strftime("%Hh %Mmin", time.gmtime(time_remaining + 30))} left.\r',
-                            end=''
+                            f'About {time.strftime("%Hh %Mmin", time.gmtime(time_remaining + 30))} left. ',
+                            f'({time_elapsed / n_sample_generated: .2f} sec per sample)',
+                            end='\r'
                         )
 
                     if n_sample_generated >= args.n_sample:
