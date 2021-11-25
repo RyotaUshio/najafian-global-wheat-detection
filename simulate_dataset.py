@@ -3,6 +3,7 @@ import torchvision
 import cv2
 import albumentations as A
 import numpy as np
+import skimage.measure
 import pathlib
 import os
 import errno
@@ -11,15 +12,15 @@ import argparse
 import dataclasses
 from typing import ClassVar, Callable
 import time
-from collections import OrderedDict
+from collections import namedtuple, OrderedDict
 
 _patterns = [
-  re.compile(r'(.+)_(\d{4})_class(\d)\.(.+)'),
-  re.compile(r'(.+)_(\d{4})(?!_class\d)\.(.+)'),
-  re.compile(r'(.+)\.(.+)')
+  re.compile(r'(.+)_(\d{4})(\..+)'),
+  re.compile(r'(.+)(\..+)')
 ]
 
 def parse_fname(fname):
+    fname = pathlib.Path(fname).name
     for i, pattern in enumerate(_patterns):
         m = pattern.match(fname)
         if m:
@@ -27,27 +28,17 @@ def parse_fname(fname):
         if i == len(_patterns) - 1:
             raise Exception(f'An invalid file name "{fname}" was given')
 
-    ret = {k: None for k in ['stem', 'time', 'i_class', 'extension']}
+    ret = {k: None for k in ['stem', 'time', 'extension']}
     
     if i == 0:
-      keys = ['stem', 'time', 'i_class', 'extension']
-    elif i == 1:
       keys = ['stem', 'time', 'extension']
-    elif i == 2:
+    elif i == 1:
       keys = ['stem', 'extension']
+    else:
+        assert False
 
     ret.update({k: v for k, v in zip(keys, m.groups())})
-    if ret['i_class'] is not None:
-      ret['i_class'] = int(ret['i_class'])
-
     return ret
-
-def get_image_path(p_mask, p_rep_dir, extension):
-    parsed = parse_fname(p_mask.name)
-    if not extension.startswith('.'):
-        extension = '.' + extension
-    image_name = parsed['stem'] + '_' + parsed['time'] + extension
-    return p_rep_dir / image_name
 
 def get_classes(p_labels):
     classes = []
@@ -63,26 +54,27 @@ def tensorimage_to_numpy(tensor):
     """
     return tensor.numpy().transpose((1, 2, 0))
 
-def read_mask(path, device):
-    return torch.as_tensor(np.load(path)).to(device)
-
-def read_image(path, device):
-    return torchvision.io.read_image(
+def read_image(path, device=None):
+    image = torchvision.io.read_image(
       str(path),
       mode=torchvision.io.ImageReadMode.RGB
-    ).to(device)
+    )
+    if device is not None:
+        image = image.to(device)
+    return image
 
-def read_frame(cap, i_frame, device):
+def read_frame(cap, i_frame, device=None):
     cap.set(cv2.CAP_PROP_POS_FRAMES, i_frame)
     opened, frame = cap.read()
     if not opened:
-        raise RuntimeError('Could not read {i_frame}-th frame from the background video {p_video} with {n_frame} frames')
+        raise RuntimeError(f'Could not read {i_frame}-th frame from the background video {p_video} with {n_frame} frames')
     frame = frame[:, :, [2, 1, 0]] # OpenCV reads image in (B, G, R(, A)) order
     frame = frame.transpose((2, 0, 1)) # (H, W, C) -> (C, H, W)
     frame = torch.as_tensor(frame)
-    return frame.to(device)
+    if device is not None:
+        frame = frame.to(device)
+    return frame
     
-
 def save_image(tensor, fname):
     tensor = tensor.cpu()
     if isinstance(tensor, torch.ByteTensor):
@@ -101,6 +93,24 @@ def get_bbox(mask):
         bottom=bottom.item()
     )
 
+def make_classwise_mask(p_mask, n_class):
+    """p_mask: path to .npy file which contains class-wise masks in the VOC format
+    """
+    labels = torch.as_tensor(np.load(p_mask))
+    ret = dict()
+    for i_class in range(n_class):
+        classwise_label = (labels == i_class + 1)
+        ret.update({i_class: classwise_label})
+    return ret
+
+def make_objectwise_mask(classwise_masks, n_class):
+    ret = dict()
+    for i_class in range(n_class):
+        objectwise_labels = skimage.measure.label(classwise_masks[i_class]) # labels connected components
+        object_id = np.unique(objectwise_labels)[1:] # ignore background = 0
+        masks = (objectwise_labels == object_id.reshape(-1, 1, 1))
+        ret.update({i_class: torch.as_tensor(masks)})
+    return ret
     
 @dataclasses.dataclass
 class foreground_obj:
@@ -160,42 +170,49 @@ class foreground_obj:
         """新しいオブジェクトを返すように！！"""
     
     @classmethod
-    def from_npy(cls, image_path, mask_path, classes=None):
+    def from_voc(cls, p_image, p_mask, classes, device=None):
         """generate a list of foreground objects from .npy file
         """
-        image_path = pathlib.Path(image_path)
-        mask_path = pathlib.Path(mask_path)
-        parsed = parse_fname(mask_path.name)
-        
-        stem = parsed['stem'] # filename without extensions
-        time_elapsed = time.strptime(parsed['time'], '%M%S') # time elapsed since the start of the vid
-        i_class = parsed['i_class']
-        class_name = None
-        if classes is not None:
-            class_name = classes[i_class - 1] # i_class is 1-origin
-        extension = parsed['extension'] # extension of image file e.g. 'png', 'jpeg', etc.
+        p_image = pathlib.Path(p_image)
+        p_mask = pathlib.Path(p_mask)
+        n_class = len(classes)
 
         # read mask & image files
-        masks = read_mask(mask_path, device)
-        image = read_image(image_path, device)
+        classwise_mask = make_classwise_mask(p_mask, n_class)
+        objectwise_mask = make_objectwise_mask(classwise_mask, n_class)
+        if device is not None:
+            for dic in [classwise_mask, objectwise_mask]:
+                for k, v in dic.items():
+                    dic.update({k: v.to(device)})
+        image = read_image(p_image, device)
 
-        objects = []
-        for mask in masks:
-            fg = foreground_obj(
-                image=image, 
-                mask=mask,
-                image_path=image_path,
-                mask_path=mask_path,
-                stem=stem,
-                time=time_elapsed,
-                i_class = i_class,
-                class_name=class_name,
-                extension = extension
-            )               
-            objects.append(fg)
+        parsed = parse_fname(p_mask)
+        objects = dict()
+        stem = parsed['stem'] # filename without extensions
+        time_elapsed = time.strptime(parsed['time'], '%M%S') # time elapsed since the start of the vid
 
-        return objects, stem, class_name
-
+        for i_class in range(n_class):
+            obj_list = []
+            class_name = classes[i_class]
+            extension = p_image.suffix # extension of image file e.g. 'png', 'jpeg', etc.
+            masks = objectwise_mask[i_class]
+            for mask in masks:
+                obj = cls(
+                    image=image, 
+                    mask=mask,
+                    image_path=p_image,
+                    mask_path=p_mask,
+                    stem=stem,
+                    time=time_elapsed,
+                    i_class=i_class,
+                    class_name=class_name,
+                    extension=extension
+                )        
+                obj_list.append(obj)
+            objects.update({i_class: obj_list})
+            
+        return_type = namedtuple('return_type', ['objects', 'classwise_mask', 'objectwise_mask'])
+        return return_type(objects, classwise_mask, objectwise_mask)
 
 class yolo_label:
   def __init__(self, image_width, image_height):
@@ -253,8 +270,7 @@ def synthesize(frame, objs, classes, prob):
     for i in range(n_obj):
         while True:
           i_class = rng.choice(range(n_class), p=prob)
-          class_name = classes[i_class]
-          objects = objs[class_name]
+          objects = objs[i_class]
           if objects:
             break
         obj = rng.choice(objects)
@@ -262,22 +278,27 @@ def synthesize(frame, objs, classes, prob):
         bbox = obj.random_place(frame)
         label.add(i_class, bbox)
     return frame, label
+
+def domain_adaptation1(rep_image, objects):
+    pass
+
         
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-r', '--root', help='root directory of the project (optional). if given, all other pathes are assumed to be relative to the root.', type=pathlib.Path)
-    parser.add_argument('mask_dir', help='input directory where mask files named [image_name]_class[class_id].npy are placed', type=pathlib.Path)
-    parser.add_argument('rep_dir', help='input directory where representative image files are placed. Note that a filename must have the format of [video name]_[%%M%%S] where %%M and %%S denote minute and second as decimal numbers, respectedly', type=pathlib.Path)
-    parser.add_argument('video_dir', help='input directory where video files of chestnut fields are placed', type=pathlib.Path)
-    parser.add_argument('background_dir', help='input directory where background video files are placed', type=pathlib.Path)
-    parser.add_argument('output_dir', help='output directory where generated dataset will be exported. Note that two directories will be made under the output_dir, namely "images" and "labels"', type=pathlib.Path)
-    parser.add_argument('labels', help='path to the labels file', type=pathlib.Path)
-    parser.add_argument('n_sample', help='number of samples of the dataset that will be generated synthetically', type=int)
-    parser.add_argument('-p', '--probability', help='probability that a foreground object is chosen from each class when synthesizving dataset. This must have the same length as number of classes. Defaults to [1/n_class, 1/n_class, ...]', nargs='*', type=float)
+    parser.add_argument('--root', help='root directory of the project (optional). if given, all other pathes are assumed to be relative to the root.', type=pathlib.Path)
+    parser.add_argument('--mask', help='[required] input directory where VOC mask files named [image_name].npy are placed', type=pathlib.Path, required=True)
+    parser.add_argument('--rep', help='[required] input directory where representative image files are placed. Note that a filename must have the format of [video name]_[%%M%%S] where %%M and %%S denote minute and second as decimal numbers, respectedly', type=pathlib.Path, required=True)
+    parser.add_argument('--video', help='[required] input directory where video files of chestnut fields are placed', type=pathlib.Path, required=True)
+    parser.add_argument('--back', '--background', help='[required] input directory where background video files are placed', type=pathlib.Path, required=True)
+    parser.add_argument('-o', '--output', help='[required] output directory where generated dataset will be exported. Note that two directories will be made under the output_dir, namely "images" and "labels"', type=pathlib.Path, required=True)
+    parser.add_argument('--labels', help='[required] path to the labels file', type=pathlib.Path, required=True)
+    parser.add_argument('-n', '--n-sample', help='[required] number of samples of the dataset that will be generated synthetically', type=int, required=True)
+    parser.add_argument('-p', '--probability', '--prob', help='probability that a foreground object is chosen from each class when synthesizving dataset. This must have the same length as number of classes. Defaults to [1/n_class, 1/n_class, ...]', nargs='*', type=float)
     parser.add_argument('-e', '--extension', help='extension(s) of image files', nargs='?', default='.png')
     parser.add_argument('-v', '--verbose', help='When specified, display the progress and time remaining', action='store_true')
     parser.add_argument('-b', '--bbox', help='When specified, images with calculated bounding boxes are also saved', action='store_true')
     parser.add_argument('-c', '--cuda', help='When specified, try to use cuda if available', action='store_true')
+
     args = parser.parse_args()
     if not args.extension.startswith('.'):
         args.extension = '.' + args.extension
@@ -298,11 +319,11 @@ if __name__ == '__main__':
         print(f'using {device} device')
         print('making output directories...', end='')
     
-    p_mask_dir = args.mask_dir
-    p_rep_dir = args.rep_dir
-    p_video_dir = args.video_dir
-    p_back_dir = args.background_dir
-    p_output_dir = args.output_dir
+    p_mask_dir = args.mask
+    p_rep_dir = args.rep
+    p_video_dir = args.video
+    p_back_dir = args.back
+    p_output_dir = args.output
     p_output_images_dir = p_output_dir / 'images/all'
     p_output_labels_dir = p_output_dir / 'labels/all'        
     p_output_images_dir.mkdir(parents=True, exist_ok=True)
@@ -338,17 +359,22 @@ if __name__ == '__main__':
     # stem = filename - suffix : corresponds to each video clip with foreground objects
     stems = [parse_fname(p_video.name)['stem'] for p_video in p_video_dir.glob('*.mp4')]
     obj_dict = {
-        stem: {class_name: [] for class_name in classes}
+        stem: {i_class: [] for i_class in range(n_class)}
         for stem in rep_stems
     }
 
     # generate foreground objects and put them into obj_dict
     if args.verbose:
         print('constructing foreground objects...', end='')
+
+    classwise_masks = dict()
     for p_mask in p_mask_dir.glob('*.npy'):
-        p_image = get_image_path(p_mask=p_mask, p_rep_dir=p_rep_dir, extension=args.extension)
-        objects, stem, class_name = foreground_obj.from_npy(p_image, p_mask, classes) # a list of foreground objects contained in p_image
-        obj_dict[stem][class_name].extend(objects)
+        stem = parse_fname(p_mask)['stem']
+        p_image = p_rep_dir / (p_mask.stem + args.extension) # get_image_path(p_mask=p_mask, p_rep_dir=p_rep_dir, extension=args.extension)
+        objects, classwise_mask, objectwise_mask = foreground_obj.from_voc(p_image, p_mask, classes, device) # a list of foreground objects contained in p_image
+        for i_class in range(n_class):
+            obj_dict[stem][i_class].extend(objects[i_class])
+        classwise_masks.update({p_mask: classwise_mask})
     if args.verbose:
         print('done')
 
@@ -388,11 +414,14 @@ if __name__ == '__main__':
                 for _ in range(n_sample_per_pair):
                     # randomly select a background frame from p_video
                     i_frame = rng.choice(n_frame)
-                    try:
-                        frame = read_frame(cap, i_frame, device)
-                    except RuntimeError as e:
-                        print('Something went wrong while reading frames from a video:')
-                        print(e)
+                    while True:
+                        try:
+                            frame = read_frame(cap, i_frame, device)
+                        except RuntimeError as e:
+                            print('Something went wrong while reading frames from a video:')
+                            print(e)
+                        else:
+                            break
 
                     frame, label = synthesize(
                         frame=frame,
