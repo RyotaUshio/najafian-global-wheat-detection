@@ -82,7 +82,7 @@ def save_image(tensor, fname):
         tensor /= 255.0
     torchvision.utils.save_image(tensor, fname)
 
-def save_labeled_image(image, label, output_labeled_image_name):
+def save_labeled_image(image, label, output_labeled_image_name, classes):
     save_image(
         torchvision.utils.draw_bounding_boxes(
             image=image.cpu(),
@@ -93,7 +93,9 @@ def save_labeled_image(image, label, output_labeled_image_name):
     )    
   
 def get_bbox(masks):
+    return_list = True
     if masks.ndim <= 2:
+        return_list = False
         masks = torch.unsqueeze(masks, 0)
 
     boxes = torchvision.ops.masks_to_boxes(masks).to(int)
@@ -101,36 +103,28 @@ def get_bbox(masks):
     for box in boxes:
         left, top, right, bottom = box
         ret.append(dict(left=left.item(), right=right.item(), top=top.item(), bottom=bottom.item()))
-    if len(ret) == 1:
-        ret = ret[0]
-    return ret
+    return ret if return_list else ret[0]
 
 def make_classwise_mask(p_mask, n_class):
     """p_mask: path to .npy file which contains class-wise masks in the VOC format
     """
     labels = torch.as_tensor(np.load(p_mask))
-    # ret = dict()
     masks = []
     for i_class in range(n_class):
         classwise_mask = (labels == i_class + 1)
-        # ret.update({i_class: classwise_mask})
         masks.append(classwise_mask)
-    # return ret
     return torch.stack(masks)
 
 def make_objectwise_mask(classwise_masks, n_class):
     """classwise_masks: tensor of shape n_class x H x W (stack of masks)
     """
     ret = dict()
-    # masks = []
     for i_class in range(n_class):
         objectwise_masks = skimage.measure.label(classwise_masks[i_class]) # labels connected components
         object_id = np.unique(objectwise_masks)[1:] # ignore background = 0
         objectwise_masks = (objectwise_masks == object_id.reshape(-1, 1, 1))
         ret.update({i_class: torch.as_tensor(objectwise_masks)})
-        # masks.append(torch.as_tensor(objectwise_masks))
     return ret
-    # return torch.stack(masks)
     
 @dataclasses.dataclass
 class foreground_obj:
@@ -300,7 +294,8 @@ def synthesize(frame, objs, classes, prob):
         label.add(i_class=i_class, bbox=bbox)
     return frame, label
 
-def generate_rotated_rep_image(p_image, classwise_mask, *, p_output_dir, n_class, device, bbox, counter):
+def generate_rotated_rep_image(p_image, classwise_mask, *, p_output_dir, classes, device, bbox, counter):
+    n_class = len(classes)
     image = read_image(p_image)
     concat = torch.cat(
         [image, classwise_mask]
@@ -322,8 +317,8 @@ def generate_rotated_rep_image(p_image, classwise_mask, *, p_output_dir, n_class
         save_image(image, output_image_name)
         label.save(output_label_name)
         if bbox:
-            output_labeled_image_name = p_output_labeled_images_dir / (output_stem + args.extension)
-            save_labeled_image(frame, label, output_labeled_image_name)
+            output_labeled_image_name = p_output_labeled_images_dir / (output_stem + p_image.suffix)
+            save_labeled_image(image, label, output_labeled_image_name, classes)
         counter()
             
 def _generate_rotated_rep_image_impl(concat, *, degree, n_class):
@@ -470,7 +465,7 @@ def make_logger(*, verbose):
             print(*args, **kwargs)
     return log
 
-if __name__ == '__main__':
+def main():
     args = parse_args()
     device = 'cuda' if args.cuda and torch.cuda.is_available() else 'cpu'
     logger = make_logger(verbose=args.verbose)
@@ -605,7 +600,7 @@ if __name__ == '__main__':
 
                         if args.bbox:
                             output_labeled_image_name = p_output_labeled_images_dir / (output_stem + args.extension)
-                            save_labeled_image(frame, label, output_labeled_image_name)
+                            save_labeled_image(frame, label, output_labeled_image_name, classes)
 
                         counter()
 
@@ -628,10 +623,13 @@ if __name__ == '__main__':
                     p_image, 
                     classwise_masks[p_image.stem], 
                     p_output_dir=args.domain_adaptation, 
-                    n_class=n_class, 
+                    classes=classes, 
                     device=device,
                     bbox=args.bbox,
                     counter=counter
                 )
         except StopIteration:
             logger('\ndone')
+    
+if __name__ == '__main__':
+    main()
