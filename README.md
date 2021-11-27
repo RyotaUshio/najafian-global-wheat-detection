@@ -12,7 +12,7 @@ Albumentation>=1.1.0
 
 ## Preparing datasets
 
-1. Prepare your videos. Put video clips of backgrounds in `back` directory, fields in 'field'.
+1. Prepare your videos. Put video clips of backgrounds in `back` directory, fields in `field`.
 
 2. Choose 1 or more "representative frames" from each video clip of fields. Put them in `rep` directory.
 
