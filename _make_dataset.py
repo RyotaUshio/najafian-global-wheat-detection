@@ -54,6 +54,46 @@ def get_bbox(masks):
         ret.append(dict(left=left.item(), right=right.item(), top=top.item(), bottom=bottom.item()))
     return ret if return_list else ret[0]
 
+def bbox_to_pascal_voc(bbox: dict):
+    """(x_min, y_min, x_max, y_max)
+    """
+    return bbox['left'], bbox['top'], bbox['right'], bbox['bottom']
+
+def bbox_to_albumentations(bbox: dict, *, image_width: int, image_height: int):
+    """normalized (x_min, y_min, x_max, y_max)
+    """
+    x_min, y_min, x_max, y_max = bbox_to_pascal_voc(bbox)
+    x_min /= image_width
+    y_min /= image_height
+    x_max /= image_width
+    y_max /= image_height
+    return x_min, y_min, x_max, y_max
+
+def bbox_to_coco(bbox: dict):
+    """(x_min, y_min, width, height)
+    """
+    x_min, y_min, x_max, y_max = bbox_to_pascal_voc(bbox)
+    width = x_max - x_min
+    height = y_max - y_min
+    return x_min, y_min, width, height
+        
+def bbox_to_yolo(bbox: dict, *, image_width: int, image_height: int):
+    """normalized (x_center, y_center, width, height)
+    """
+    x_min, y_min, x_max, y_max = bbox_to_pascal_voc(bbox)
+    x_center = 0.5 * (x_min + x_max)
+    y_center = 0.5 * (y_min+ y_max)
+    width = x_max - x_min
+    height = y_max - y_min
+
+    # normalize so that everything will be in [0, 1]
+    x_center /= image_width
+    y_center /= image_height
+    width /= image_width
+    height /= image_height
+
+    return x_center, y_center, width, height
+
 def make_classwise_mask(p_mask, n_class):
     """p_mask: path to .npy file which contains class-wise masks in the VOC format
     """
@@ -294,7 +334,8 @@ class RepImage:
 
 @dataclasses.dataclass
 class ForegroundObject:
-    _random_rotate: ClassVar[Callable] = torchvision.transforms.RandomRotation(degrees=180, expand=True, fill=0)
+    __random_rotate: ClassVar[Callable] = torchvision.transforms.RandomRotation(degrees=180, expand=True, fill=0)
+    __bbox_formats: ClassVar[List[str]] = ['pascal_voc', 'albumentations', 'coco', 'yolo']
 
     rep_image: RepImage
     mask: torch.Tensor
@@ -316,8 +357,26 @@ class ForegroundObject:
         tensor = tensor.transpose(0, -2).transpose(1, -1)
         tensor = tensor[top:bottom, left:right]
         tensor = tensor.transpose(1, -1).transpose(0, -2)
-        return tensor        
-        
+        return tensor
+
+    def bbox_to(self, format):
+        if format not in self.__bbox_formats:
+            raise ValueError(f'invalid format "{format}" was given')
+        func = getattr(self, 'bbox_to_' + format)
+        return func()
+
+    def bbox_to_pascal_voc(self):
+        return bbox_to_pascal_voc(self.bbox)
+
+    def bbox_to_albumentations(self):
+        return bbox_to_albumentations(self.bbox, image_width=self.rep_image.width, image_height=self.rep_image.height)
+
+    def bbox_to_coco(self):
+        return bbox_to_coco(self.bbox)
+
+    def bbox_to_yolo(self):
+        return bbox_to_yolo(self.bbox, image_width=self.rep_image.width, image_height=self.rep_image.height)
+
     def random_place(self, background):
         """Randomly place the object on the given background image. This is an in-place operation.
         
@@ -326,7 +385,7 @@ class ForegroundObject:
         background: array or tensor
           An image on which the object is placed
         """
-        rotated = self._random_rotate(
+        rotated = self.__random_rotate(
             torch.cat(
                 [self.image_cropped, torch.unsqueeze(self.mask_cropped, 0)]
             )
@@ -349,58 +408,63 @@ class ForegroundObject:
     
 
 class YoloLabel:
-  def __init__(self, image):
-    self.bboxes = []
-    self.image_width = float(image.size(-1))
-    self.image_height = float(image.size(-2))
-    self.dicts = []
+    def __init__(self, image):
+        self.bboxes = []
+        self.image_width = float(image.size(-1))
+        self.image_height = float(image.size(-2))
+        self.dicts = []
 
-  def add(self, i_class: int, bbox: dict):
-    x_center = 0.5 * (bbox['left'] + bbox['right'])
-    y_center = 0.5 * (bbox['top'] + bbox['bottom'])
-    width = bbox['right'] - bbox['left']
-    height = bbox['bottom'] - bbox['top']
+    def add(self, *, obj: ForegroundObject=None, i_class: int=None, bbox: dict=None):
+        """call with signature of add(obj=obj) or add(i_class=i_class, bbox=bbox)
+        """
+        if obj is not None:
+            assert i_class is None and bbox is None
+            x_center, y_center, width, height = obj.bbox_to_yolo()    
+            i_class = obj.i_class
+        else:
+            assert i_class is not None and bbox is not None
+            x_center, y_center, width, height = bbox_to_yolo(bbox, image_width=self.image_width, image_height=self.image_height)
+        self.bboxes.append(
+            OrderedDict(
+                i_class=i_class, 
+                x_center=x_center,
+                y_center=y_center,
+                width=width,
+                height=height
+            )
+        )
+        self.dicts.append(bbox)
 
-    # normalize so that everything will be in [0, 1]
-    x_center /= self.image_width
-    y_center /= self.image_height
-    width /= self.image_width
-    height /= self.image_height
+    def save(self, fname):
+        with open(fname, 'w') as f:
+            for label in self.bboxes:
+                row = ' '.join([str(value) for value in label.values()])
+                row += '\n'
+                f.write(row)
 
-    self.bboxes.append(
-      OrderedDict(
-        i_class=i_class, 
-        x_center=x_center,
-        y_center=y_center,
-        width=width,
-        height=height
-      )
-    )
-    self.dicts.append(bbox)
+    def to_tensor(self):
+        return torch.tensor([[bbox['left'], bbox['top'], bbox['right'], bbox['bottom']] for bbox in self.dicts])
 
-  def save(self, fname):
-    with open(fname, 'w') as f:
-      for label in self.bboxes:
-        row = ' '.join([str(value) for value in label.values()])
-        row += '\n'
-        f.write(row)
+    def class_name_list(self, classes):
+        return [classes[bbox['i_class']] for bbox in self.bboxes]
 
-  def to_tensor(self):
-      return torch.tensor([[bbox['left'], bbox['top'], bbox['right'], bbox['bottom']] for bbox in self.dicts])
 
-  def class_name_list(self, classes):
-      return [classes[bbox['i_class']] for bbox in self.bboxes]
-
-def foreground_augmentation(rep_images):
-    """return a new abject
-    """
-    return [rep_image.image for rep_image in rep_images]
-    # return [rep_image.image.detach().clone() for rep_image in rep_images] # not implemented yet
+def foreground_augmentation(field_video, format='yolo'):
+    images = []
+    transform = utils.make_foreground_augmentation()
+    for rep_image in field_video.rep_images:
+        transformed = transform(image=utils.tensorimage_to_numpy(rep_image.image))
+        image = transformed['image']
+        image = utils.numpyimage_to_tensor(image, device=rep_image.image.device)
+        images.append(image)
+    return images
 
 def background_augmentation(frame):
-    """in-place
-    """
-    return frame # not implemented yet
+    transform = utils.make_background_augmentation()
+    transformed = transform(image=utils.tensorimage_to_numpy(frame))
+    image = transformed['image']
+    image = utils.numpyimage_to_tensor(image, device=frame.device)
+    return image
 
 def synthesize(*, frame, field_video, prob=None):
     """randomly place foreground objects onto the given frame in-place
@@ -415,7 +479,7 @@ def synthesize(*, frame, field_video, prob=None):
     n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
     n_class = len(field_video.classes)
     label = YoloLabel(frame)
-    rep_images_aug = foreground_augmentation(field_video.rep_images)
+    rep_images_aug = foreground_augmentation(field_video)
     frame_aug = background_augmentation(frame)
 
     with field_video.rep_images_as(rep_images_aug):

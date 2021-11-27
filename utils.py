@@ -19,7 +19,16 @@ def get_classes(p_labels):
 def tensorimage_to_numpy(tensor):
     """(C x H x W) to (H x W x C)
     """
-    return tensor.numpy().transpose((1, 2, 0))
+    return tensor.cpu().numpy().transpose((1, 2, 0))
+
+def numpyimage_to_tensor(ndarr, device=None, opencv=False):
+    if opencv:
+        ndarr = ndarr[:, :, [2, 1, 0]] # OpenCV reads image in (B, G, R(, A)) order
+    ndarr = ndarr.transpose((2, 0, 1)) # (H, W, C) -> (C, H, W)
+    tensor = torch.as_tensor(ndarr)
+    if device is not None:
+        tensor = tensor.to(device)
+    return tensor
 
 def read_image(path, device=None):
     image = torchvision.io.read_image(
@@ -35,11 +44,7 @@ def read_frame(cap, i_frame, device=None):
     opened, frame = cap.read()
     if not opened:
         raise RuntimeError(f'Could not read {i_frame}-th frame from the background video {p_video} with {n_frame} frames')
-    frame = frame[:, :, [2, 1, 0]] # OpenCV reads image in (B, G, R(, A)) order
-    frame = frame.transpose((2, 0, 1)) # (H, W, C) -> (C, H, W)
-    frame = torch.as_tensor(frame)
-    if device is not None:
-        frame = frame.to(device)
+    frame = numpyimage_to_tensor(frame, device=device, opencv=True)
     return frame
     
 def save_image(tensor, fname):
@@ -93,3 +98,78 @@ def make_logger(*, verbose):
         if verbose:
             print(*args, **kwargs)
     return log
+
+def make_strong_augmentation(*, bbox_format=None, min_area=0.0, min_visibility=0.0):
+    if bbox_format is None:
+        if not (min_area == min_visibility == 0.0):
+            raise ValueError('bbox_format is required')
+        kwargs = {}
+    else:
+        kwargs = dict(bbox_params=A.BboxParams(
+            format=bbox_format,
+            min_area=min_area,
+            min_visibility=min_visibility, 
+            label_fields=['i_class']
+        ))
+    
+    transform = A.Compose([
+        A.Blur(),
+        A.ChannelShuffle(),
+        A.CLAHE(),
+        A.ColorJitter(),
+        A.Equalize(),
+        A.FancyPCA(),
+        A.Flip(),
+        A.GaussianBlur(),
+        A.GaussNoise(),
+        A.GlassBlur(),
+        A.HorizontalFlip(),
+        A.HueSaturationValue(),
+        A.InvertImg(),
+        A.MedianBlur(),
+        A.MotionBlur(), # ADDED!
+        A.MultiplicativeNoise(),
+        A.Posterize(),
+        A.RandomBrightnessContrast(),
+        A.RandomSnow(),
+        A.RandomSunFlare(),
+        A.RGBShift(),
+        A.Solarize(),
+        A.ToGray(),
+        A.VerticalFlip()],
+        **kwargs
+    )
+    return transform
+
+def make_foreground_augmentation():
+    # とりあえず、strong augmentationからpixel-wiseでないものを除く。
+    transform = A.Compose([
+        A.Blur(),
+        A.ChannelShuffle(),
+        A.CLAHE(),
+        A.ColorJitter(),
+        A.Equalize(),
+        A.FancyPCA(),
+        # A.Flip(),
+        A.GaussianBlur(),
+        A.GaussNoise(),
+        A.GlassBlur(),
+        # A.HorizontalFlip(),
+        A.HueSaturationValue(),
+        A.InvertImg(),
+        A.MedianBlur(),
+        A.MotionBlur(), # ADDED!
+        A.MultiplicativeNoise(),
+        A.Posterize(),
+        A.RandomBrightnessContrast(),
+        A.RandomSnow(),
+        A.RandomSunFlare(),
+        A.RGBShift(),
+        A.Solarize(),
+        A.ToGray()],
+        # A.VerticalFlip()]
+    )
+    return transform
+
+def make_background_augmentation():
+    return make_strong_augmentation()
