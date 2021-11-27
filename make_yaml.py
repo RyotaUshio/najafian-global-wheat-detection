@@ -1,3 +1,4 @@
+#!/usr/bin/env/python3
 import argparse
 import pathlib
 from collections import OrderedDict
