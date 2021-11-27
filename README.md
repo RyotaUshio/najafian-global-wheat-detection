@@ -3,6 +3,13 @@
 This is an implementation of the method proposed in
 > Keyhan Najafian, Alireza Ghanbari, Ian Stavness, Lingling Jin, Gholam Hassan Shirdel, and Farhad Maleki. Semi-self-supervised Learning Approach for Wheat Head Detection using Extremely Small Number of Labeled Samples. In *Proceedings of the IEEE/CVF International Conference on Computer Vision*, pages 1342-1351, 2021.
 
+## Requirements
+Python>=3.6.0
+NumPy>=??
+PyTorch>=1.7
+OpenCV>=??
+Albumentation>=1.1.0
+
 ## Preparing datasets
 
 1. Prepare your videos. Put video clips of backgrounds in `back` directory, fields in 'field'.
@@ -57,7 +64,45 @@ project_root
 └───labels.txt
 ```
 
-5. Generate a composite dataset & a dataset for the 1st step of domain adaptation with the following command.
+5. Run the following to generate datasets.
 ```
-python make_dataset.py -n [n_sample] -p [prob_1 prob_2 ... prob_n_class] --root [path to the root directory of your project] -o composite --verbose --bbox --cuda  --domain-adaptation domain_adaptation_1
+python make_dataset.py -n [n_sample] -p [prob_1 prob_2 ... prob_n_class] --root path/to/project_root -o composite --verbose --bbox --cuda  --domain-adaptation domain_adaptation_1
 ```
+You will see two datasets `composite` and `domain_adaptation_1` have been made.
+
+6. Make `.yaml` file for YOLOv5 training with the dataset you've made.
+```
+# composite.yaml
+path: path/to/project_root/composite/
+train: images/all
+val: images/all
+test:
+
+nc: 4
+names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut']
+```
+
+```
+# domain_adaptation_1.yaml
+path: path/to/project_root/domain_adaptation_1/
+train: images/all
+val: images/all
+test:
+
+nc: 4
+names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut']
+```
+
+7. Train YOLOv5.
+```
+git clone https://github.com/ultralytics/yolov5
+cd yolov5
+pip install -r requirements.txt
+python train.py --img 640 --batch 16 --epochs 3 --data composite.yaml --weights yolov5s.pt
+python train.py --img 640 --batch 16 --epochs 3 --data domain_adaptation_1.yaml --weights []
+```
+
+8. Make pseudo labels with the last model you've trained.
+
+9. Train the model further with the pseudo labels.
+
