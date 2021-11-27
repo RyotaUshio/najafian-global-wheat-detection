@@ -20,27 +20,31 @@ def parse_args():
     )
     parser.add_argument(
         '--mask', 
-        help='[required] input directory where VOC mask files named [image_name].npy are placed', 
+        help='input directory where VOC mask files named [image_name].npy are placed', 
         type=pathlib.Path, 
-        required=True
+        nargs='?',
+        default='mask'
     )
     parser.add_argument(
         '--rep', 
         help='[required] input directory where representative image files are placed. Note that a filename must have the format of [video name]_[%%M%%S] where %%M and %%S denote minute and second as decimal numbers, respectedly', 
         type=pathlib.Path, 
-        required=True
+        nargs='?',
+        default='rep'
     )
     parser.add_argument(
         '--field',
         help='[required] input directory where video files of fields are placed', 
         type=pathlib.Path, 
-        required=True
+        nargs='?',
+        default='field'
     )
     parser.add_argument(
         '--back', '--background', 
         help='[required] input directory where background video files are placed', 
         type=pathlib.Path, 
-        required=True
+        nargs='?',
+        default='back'
     )
     parser.add_argument(
         '-o', '--output', 
@@ -57,7 +61,8 @@ def parse_args():
         '--labels', 
         help='[required] path to the labels file', 
         type=pathlib.Path, 
-        required=True
+        nargs='?',
+        default='labels.txt'
     )
     parser.add_argument(
         '-n', '--n-sample', 
@@ -99,7 +104,8 @@ def parse_args():
     if args.root is not None:
         args_dict = vars(args)
         for key in ['mask', 'rep', 'field', 'back', 'output', 'domain_adaptation', 'labels']:
-            args_dict[key] = args.root / args_dict[key]
+            if args_dict[key] is not None:
+                args_dict[key] = args.root / args_dict[key]
             if key in ['mask', 'rep', 'field', 'back', 'labels']:
                 if not args_dict[key].exists():
                     raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
@@ -161,10 +167,10 @@ def main():
     # class probabilities
     if args.probability:
         assert len(args.probability) == n_class, 'n_probability must be equal to n_class'
+        prob = np.array(args.probability)
+        prob /= prob.sum()
     else:
-        args.probability = [1.0/n_class] * n_class
-    prob = np.array(args.probability)
-    prob /= prob.sum()
+        prob = None
 
     # generate objects of FieldVideo, RepImage, ForegroundObject, BackgroundVideo
     logger('constructing asset objects...', end='')

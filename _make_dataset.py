@@ -324,6 +324,12 @@ class RepImage:
 
     def get_objects(self, **kwargs):
         keys = ['i_class', 'class_name']
+        if not kwargs:
+            objects = []
+            for i_class in range(len(self.classes)):
+                objects += self.get_objects(i_class=i_class)
+            return objects
+
         if len(kwargs) != 1 or all([not key in kwargs for key in keys]):
             raise ValueError(f'{self.__class__.__name__}.get_objects requires exactly 1 keyword argument: i_class or class_name')
         i_class = kwargs.get('i_class')
@@ -484,14 +490,18 @@ def synthesize(*, frame, field_video, prob=None):
 
     with field_video.rep_images_as(rep_images_aug):
         for _ in range(n_obj):
-            while True:
-                i_class = rng.choice(range(n_class), p=prob)
-                objects = field_video.get_objects(i_class=i_class)
-                if objects: # retry if empty
-                    break
+            if prob is None:
+                objects = field_video.get_objects()
+            else:
+                while True:
+                    i_class = rng.choice(range(n_class), p=prob)
+                    objects = field_video.get_objects(i_class=i_class)
+                    if objects: # retry if empty
+                        break
+            
             obj = rng.choice(objects)
             bbox = obj.random_place(frame_aug)
-            label.add(i_class=i_class, bbox=bbox)
+            label.add(i_class=obj.i_class, bbox=bbox)
 
     return frame_aug, label
 
