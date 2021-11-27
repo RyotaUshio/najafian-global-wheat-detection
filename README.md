@@ -93,6 +93,8 @@ nc: 4
 names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut']
 ```
 
+## Train your model
+
 7. Train YOLOv5.
 ```
 git clone https://github.com/ultralytics/yolov5
