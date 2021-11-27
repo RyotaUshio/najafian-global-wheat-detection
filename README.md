@@ -3,6 +3,8 @@
 This is an implementation of the method proposed in
 > Keyhan Najafian, Alireza Ghanbari, Ian Stavness, Lingling Jin, Gholam Hassan Shirdel, and Farhad Maleki. Semi-self-supervised Learning Approach for Wheat Head Detection using Extremely Small Number of Labeled Samples. In *Proceedings of the IEEE/CVF International Conference on Computer Vision*, pages 1342-1351, 2021.
 
+## Preparing datasets
+
 1. Prepare your videos. Put video clips of backgrounds in `back` directory, fields in 'field'.
 
 2. Choose 1 or more "representative frames" from each video clip of fields. Put them in `rep` directory.
@@ -23,7 +25,7 @@ nut(fine)
 nut(empty)
 burr
 burr+nut
-``
+```
 
 6. make sure your project directory is organized as below:
 
