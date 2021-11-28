@@ -5,6 +5,7 @@ import os
 import errno
 import time
 from collections import defaultdict, namedtuple
+from tqdm import tqdm
 import torch
 import numpy as np
 
@@ -149,6 +150,21 @@ def make_path(args):
 
     return p
 
+def make_division(n_sample, *args):
+    """calculate the optimal division of n_sample
+    n_sample: total number of samples to be divided
+    *args: iterables
+    """
+    lens = [len(arg) for arg in args]
+    n_division = np.prod(lens)
+    q = n_sample // n_division
+    r = n_sample % n_division
+    divisions = np.full(lens, q)
+    for i in range(r):
+        divisions.ravel()[i] += 1
+    return divisions
+
+
 def main():
     args = parse_args()
     device = 'cuda' if args.cuda and torch.cuda.is_available() else 'cpu'
@@ -193,66 +209,49 @@ def main():
 
     # simulate datasets for each pair of (a background video, set of foregound objects in a video)
     logger('synthesizing dataset...')
-    counts = defaultdict(lambda: defaultdict(int)) # counters for avoiding file name collision
-    n_back_video = len(back_videos)
-    n_field_video = len(field_videos)
-    n_sample_per_pair = max(1, args.n_sample // (n_back_video * n_field_video))
 
-    fmt = lambda n_sample_generated, n_sample, time_elapsed, time_remaining: (
-        f'  {n_sample_generated}/{n_sample} = {n_sample_generated/n_sample*100:.1f}% completed. '
-        f'About {time.strftime("%Hh %Mmin", time.gmtime(time_remaining + 30))} left. '
-        f'({time_elapsed / n_sample_generated:.2f} sec per sample)'
-    )
-    counter = utils.make_counter(
-        n_total=args.n_sample,
-        fmt=fmt,
-        verbose=args.verbose, 
-        newline=False
-    )
-
+    field_videos_with_rep_images = [video for video in field_videos if video.rep_images]
+    division = make_division(
+        args.n_sample, 
+        back_videos, 
+        field_videos_with_rep_images
+    ) # make optimal divisions
     try:
-        while True:
-            for back_video in back_videos:
+        with tqdm(total=args.n_sample) as pbar:
+            n_sample_generated = 0
+            for i, back_video in enumerate(back_videos):
                 with back_video.open():
-                    for field_video in field_videos:
-                        if not field_video.rep_images:
-                            continue
-                        for _ in range(n_sample_per_pair):
-                            frame = back_video.random_read(device=device, noexcept=True)
-                            frame, label = mkdata.synthesize(frame=frame, field_video=field_video, prob=prob)
-
-                            # save as files
-                            index = counts[back_video.stem][field_video.stem]
-                            output_stem = f'synth_back_{back_video.stem}_field_{field_video.stem}_{index}'
-                            output_image_name = p.output_images_dir / (output_stem + args.extension)
-                            output_label_name = p.output_labels_dir / (output_stem + '.txt')
-                            utils.save_image(frame, output_image_name)
-                            label.save(output_label_name)
-
-                            if args.bbox:
-                                output_labeled_image_name = p.output_labeled_images_dir / output_image_name.name
-                                utils.save_labeled_image(frame, label, output_labeled_image_name, classes)
-
-                            counter()
-                            counts[back_video.stem][field_video.stem] += 1
-
+                    for j, field_video in enumerate(field_videos_with_rep_images):
+                        for index in range(division[i, j]):
+                            mkdata.make_composite_image(
+                                field_video=field_video, 
+                                back_video=back_video, 
+                                pathes=p, 
+                                prob=prob,
+                                args=args, 
+                                device=device,
+                                index=index
+                            )
+                            n_sample_generated += 1
+                            pbar.update(1)
+                            if n_sample_generated >= args.n_sample:
+                                raise StopIteration
+    except KeyboardInterrupt:
+        logger('interrupted by keyboard')
     except StopIteration:
         logger('done')
 
     if args.domain_adaptation is not None:
         logger('generating images & labels for the first step of domain adaptation...')
         n_rep_image = sum([len(video.rep_images) for video in field_videos])
-        counter = utils.make_counter(
-            n_total=n_rep_image * 360,
-            fmt=fmt,
-            verbose=args.verbose, 
-            newline=False
-        )
         try:
-            for field_video in field_videos:
-                for rep_image in field_video.rep_images:
-                    mkdata.generate_rotated_rep_image(rep_image, pathes=p, bbox=args.bbox, counter=counter)
-        except StopIteration:
+            with tqdm(total=n_rep_image * 360) as pbar:
+                for field_video in field_videos:
+                    for rep_image in field_video.rep_images:
+                        mkdata.make_rotated_rep_image(rep_image, pathes=p, bbox=args.bbox, pbar=pbar)
+        except KeyboardInterrupt:
+            logger('interrupted by keyboard')
+        else:
             logger('done')
     
 if __name__ == '__main__':

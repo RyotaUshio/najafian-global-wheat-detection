@@ -12,6 +12,7 @@ from typing import ClassVar, Callable, Iterable, Union, Dict, List
 import time
 from collections import OrderedDict, defaultdict, namedtuple
 import contextlib
+from tqdm import tqdm
 
 import utils
 
@@ -97,7 +98,8 @@ def bbox_to_yolo(bbox: dict, *, image_width: int, image_height: int):
 def make_classwise_mask(p_mask, n_class):
     """p_mask: path to .npy file which contains class-wise masks in the VOC format
     """
-    labels = torch.as_tensor(np.load(p_mask))
+    labels = np.load(p_mask)
+    labels = torch.as_tensor(labels)
     masks = []
     for i_class in range(n_class):
         classwise_mask = (labels == i_class + 1)
@@ -149,8 +151,12 @@ class Video:
         finally:
             self.close()
 
-    def read_frame(self, i_frame, device=None):
-        frame = utils.read_frame(self.capture, i_frame, device=device)
+    def read_frame(self, i_frame, device=None, as_numpy=False):
+        try:
+            frame = utils.read_frame(self.capture, i_frame, device=device, as_numpy=as_numpy)
+        except utils.FrameCannotBeLoaded:
+            suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(i_frame % 10, 'th')
+            raise utils.FrameCannotBeLoaded(f'Cannot load {i_frame}{suffix} frame from a video {self.p_video}')
         return frame
 
     def __len__(self):
@@ -159,13 +165,13 @@ class Video:
         n_frame = self.capture.get(cv2.CAP_PROP_FRAME_COUNT)
         return int(n_frame)
 
-    def random_read(self, device=None, noexcept=True):
+    def random_read(self, device=None, noexcept=True, as_numpy=False):
         n_frame = len(self)
         while True:
             try:
                 i_frame = np.random.choice(n_frame)
-                frame = self.read_frame(i_frame, device)
-            except RuntimeError as e:
+                frame = self.read_frame(i_frame, device, as_numpy=as_numpy)
+            except utils.FrameCannotBeLoaded as e:
                 print('Something went wrong while reading frames from a video:')
                 if noexcept:
                     print(f'  {e}')
@@ -260,7 +266,7 @@ class RepImage:
         self.device = torch.device(self.device)
         parsed = parse_fname(self.p_image)
         self.timestamp = time.strptime(parsed['time'], '%M%S')
-        self.image = utils.read_image(self.p_image, self.device)
+        self.image = utils.read_image(self.p_image, device=self.device)
         self.height = self.image.size(-2)
         self.width = self.image.size(-1)
         # read mask
@@ -391,7 +397,7 @@ class ForegroundObject:
         background: array or tensor
           An image on which the object is placed
         """
-        rotated = self.__random_rotate(
+        rotated = self.__random_rotate(     
             torch.cat(
                 [self.image_cropped, torch.unsqueeze(self.mask_cropped, 0)]
             )
@@ -416,8 +422,8 @@ class ForegroundObject:
 class YoloLabel:
     def __init__(self, image):
         self.bboxes = []
-        self.image_width = float(image.size(-1))
-        self.image_height = float(image.size(-2))
+        self.image_width = float(image.shape[-1])
+        self.image_height = float(image.shape[-2])
         self.dicts = []
 
     def add(self, *, obj: ForegroundObject=None, i_class: int=None, bbox: dict=None):
@@ -455,32 +461,71 @@ class YoloLabel:
         return [classes[bbox['i_class']] for bbox in self.bboxes]
 
 
-def foreground_augmentation(field_video, format='yolo'):
+def foreground_augmentation(field_video: FieldVideo):
+    """apply data augmentation to all the representative images of the given field video.
+
+    Note
+    ----
+    An error will be raised if any of the rep-images is on a cuda device because 
+    Albumentations cannot deal with images on GPUs.
+    """
     images = []
-    transform = utils.make_foreground_augmentation()
+    transform = utils.make_foreground_augmentation(p=0.15)
     for rep_image in field_video.rep_images:
         transformed = transform(image=utils.tensorimage_to_numpy(rep_image.image))
         image = transformed['image']
-        image = utils.numpyimage_to_tensor(image, device=rep_image.image.device)
+        image = utils.numpyimage_to_tensor(image)
         images.append(image)
     return images
 
-def background_augmentation(frame):
-    transform = utils.make_background_augmentation()
-    transformed = transform(image=utils.tensorimage_to_numpy(frame))
+def background_augmentation(frame: Union[np.ndarray, torch.Tensor]):
+    """apply data augmentation to the given frame of a background video.
+
+    Note
+    ----
+    returns torch.Tensor on cpu device.
+    """
+    if isinstance(frame, torch.Tensor):
+        frame = utils.tensorimage_to_numpy(frame)
+    transform = utils.make_background_augmentation(p=0.15)
+    transformed = transform(image=frame)
     image = transformed['image']
-    image = utils.numpyimage_to_tensor(image, device=frame.device)
+    image = utils.numpyimage_to_tensor(image)
     return image
 
-def synthesize(*, frame, field_video, prob=None):
+class HasNoRepImage(Exception):
+    """raised when a given FieldVideo object has no RepImage objects in it.
+    """
+
+def make_composite_image(*, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, prob: Union[List[float], None], args: argparse.Namespace, device: , index: int):
+    frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations
+    frame, label = synthesize(frame=frame, field_video=field_video, prob=prob, device=device)
+
+    # save as files
+    output_stem = f'synth_back_{back_video.stem}_field_{field_video.stem}_{index}'
+    output_image_name = pathes.output_images_dir / (output_stem + args.extension)
+    output_label_name = pathes.output_labels_dir / (output_stem + '.txt')
+    utils.save_image(frame, output_image_name)
+    label.save(output_label_name)
+
+    if args.bbox:
+        output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
+        utils.save_labeled_image(frame, label, output_labeled_image_name, field_video.classes)
+
+def synthesize(*, frame, field_video, prob=None, device='cpu'):
     """randomly place foreground objects onto the given frame in-place
 
     frame: a frame taken from a background video
     field_video: a field video
     prob: the probablity that a foreground object will be picked from each class
+
+    Note
+    ----
+    - frame and all the rep-images of field_video are assume to be on cpu device at the call of this function.
+    - device control is not implemented yet.
     """
     if not field_video.rep_images:
-        raise ValueError(f'field_video {field_video.p_video} has no rep_image') 
+        raise HasNoRepImage(f'field_video {field_video.p_video} has no rep_image') 
     rng = np.random.default_rng()
     n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
     n_class = len(field_video.classes)
@@ -505,12 +550,12 @@ def synthesize(*, frame, field_video, prob=None):
 
     return frame_aug, label
 
-def generate_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: bool, counter: Callable):
+def make_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: bool, pbar: tqdm):
     n_class = len(rep_image.classes)
     concat = torch.cat([rep_image.image, rep_image.classwise_mask])
     
     for degree in range(360):
-        image, label = _generate_rotated_rep_image_impl(concat, degree=degree, n_class=n_class)
+        image, label = _make_rotated_rep_image_impl(concat, degree=degree, n_class=n_class)
         output_stem = f'{rep_image.p_image.stem}_{degree:03}degrees'
         output_image_name = pathes.output_domain_adaptation_images_dir / (output_stem + rep_image.p_image.suffix)
         output_label_name = pathes.output_domain_adaptation_labels_dir / (output_stem + '.txt')
@@ -519,9 +564,9 @@ def generate_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox:
         if bbox:
             output_labeled_image_name = pathes.output_domain_adaptation_labeled_images_dir / output_image_name.name
             utils.save_labeled_image(image, label, output_labeled_image_name, rep_image.classes)
-        counter()
+        pbar.update(1)
             
-def _generate_rotated_rep_image_impl(concat, *, degree, n_class):
+def _make_rotated_rep_image_impl(concat, *, degree, n_class):
     """image: Tensor (C, H, W)
     classwise_mask: Tensor (n_class, H, W)
     """

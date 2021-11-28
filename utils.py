@@ -21,9 +21,15 @@ def tensorimage_to_numpy(tensor):
     """
     return tensor.cpu().numpy().transpose((1, 2, 0))
 
+def adjust_opencv(image):
+    # OpenCV reads image in (B, G, R(, A)) order
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # image = image[:, :, [2, 1, 0]] 
+    return image
+
 def numpyimage_to_tensor(ndarr, device=None, opencv=False):
     if opencv:
-        ndarr = ndarr[:, :, [2, 1, 0]] # OpenCV reads image in (B, G, R(, A)) order
+        ndarr = adjust_opencv(ndarr)
     ndarr = ndarr.transpose((2, 0, 1)) # (H, W, C) -> (C, H, W)
     tensor = torch.as_tensor(ndarr)
     if device is not None:
@@ -39,12 +45,19 @@ def read_image(path, device=None):
         image = image.to(device)
     return image
 
-def read_frame(cap, i_frame, device=None):
+class FrameCannotBeLoaded(Exception):
+    """raised when a frame cannot be loaded from a cv2.VideoCapture object.
+    """
+
+def read_frame(cap, i_frame, device=None, as_numpy=False):
     cap.set(cv2.CAP_PROP_POS_FRAMES, i_frame)
     opened, frame = cap.read()
     if not opened:
-        raise RuntimeError(f'Could not read {i_frame}-th frame from the background video {p_video} with {n_frame} frames')
-    frame = numpyimage_to_tensor(frame, device=device, opencv=True)
+        raise FrameCannotBeLoaded
+    if as_numpy:
+        frame = adjust_opencv(frame)
+    else:
+        frame = numpyimage_to_tensor(frame, device=device, opencv=True)
     return frame
     
 def save_image(tensor, fname):
@@ -64,34 +77,6 @@ def save_labeled_image(image, label, output_labeled_image_name, classes):
         output_labeled_image_name,
     )
 
-def make_counter(*, n_total, fmt, verbose, newline):
-    i = 0
-    t0 = time.time()
-    def counter(*args, **kwargs):
-        nonlocal i
-        nonlocal t0
-        nonlocal n_total
-        nonlocal verbose
-        nonlocal newline
-        i += 1
-        time_elapsed = time.time() - t0
-        velocity = i / time_elapsed
-        time_remaining = (n_total - i) / velocity
-        if verbose:
-            string = fmt(i, n_total, time_elapsed, time_remaining, *args, **kwargs)
-            if newline:
-                string = string + os.linesep
-            else:
-                string = '\r' + string
-            sys.stdout.write(string)
-            sys.stdout.flush()
-        if i >= n_total:
-            if verbose and not newline:
-                sys.stdout.write(os.linesep)
-                sys.stdout.flush()
-            raise StopIteration
-    return counter
-
 def make_logger(*, verbose):
     def log(*args, **kwargs):
         nonlocal verbose
@@ -99,7 +84,7 @@ def make_logger(*, verbose):
             print(*args, **kwargs)
     return log
 
-def make_strong_augmentation(*, bbox_format=None, min_area=0.0, min_visibility=0.0):
+def make_strong_augmentation(*, bbox_format=None, min_area=0.0, min_visibility=0.0, p=0.5):
     if bbox_format is None:
         if not (min_area == min_visibility == 0.0):
             raise ValueError('bbox_format is required')
@@ -113,61 +98,85 @@ def make_strong_augmentation(*, bbox_format=None, min_area=0.0, min_visibility=0
         ))
     
     transform = A.Compose([
-        A.Blur(),
-        A.ChannelShuffle(),
-        A.CLAHE(),
-        A.ColorJitter(),
-        A.Equalize(),
-        A.FancyPCA(),
-        A.Flip(),
-        A.GaussianBlur(),
-        A.GaussNoise(),
-        A.GlassBlur(),
-        A.HorizontalFlip(),
-        A.HueSaturationValue(),
-        A.InvertImg(),
-        A.MedianBlur(),
-        A.MotionBlur(), # ADDED!
-        A.MultiplicativeNoise(),
-        A.Posterize(),
-        A.RandomBrightnessContrast(),
-        A.RandomSnow(),
-        A.RandomSunFlare(),
-        A.RGBShift(),
-        A.Solarize(),
-        A.ToGray(),
-        A.VerticalFlip()],
+        A.Blur(p=p),
+        A.ChannelShuffle(p=p),
+        A.CLAHE(p=p),
+        A.ColorJitter(p=p),
+        A.Equalize(p=p),
+        A.FancyPCA(p=p),
+        A.Flip(p=p),
+        A.GaussianBlur(p=p),
+        A.GaussNoise(p=p),
+        A.GlassBlur(p=p),
+        A.HorizontalFlip(p=p),
+        A.HueSaturationValue(p=p),
+        A.InvertImg(p=p),
+        A.MedianBlur(p=p),
+        A.MotionBlur(p=p), # ADDED!
+        A.MultiplicativeNoise(p=p),
+        A.Posterize(p=p),
+        A.RandomBrightnessContrast(p=p),
+        A.RandomSnow(p=p),
+        A.RandomSunFlare(p=p),
+        A.RGBShift(p=p),
+        A.Solarize(p=p),
+        A.ToGray(p=p),
+        A.VerticalFlip(p=p)],
         **kwargs
     )
     return transform
 
-def make_foreground_augmentation():
+def make_foreground_augmentation(p=0.5):
     # とりあえず、strong augmentationからpixel-wiseでないものを除く。
     transform = A.Compose([
-        A.Blur(),
-        A.ChannelShuffle(),
-        A.CLAHE(),
-        A.ColorJitter(),
-        A.Equalize(),
-        A.FancyPCA(),
-        A.GaussianBlur(),
-        A.GaussNoise(),
-        A.GlassBlur(),
-        A.HueSaturationValue(),
-        A.InvertImg(),
-        A.MedianBlur(),
-        A.MotionBlur(),
-        A.MultiplicativeNoise(),
-        A.Posterize(),
-        A.RandomBrightnessContrast(),
-        A.RandomSnow(),
-        A.RandomSunFlare(),
-        A.RGBShift(),
-        A.Solarize(),
-        A.ToGray()],
-        # A.VerticalFlip()]
+        A.Blur(p=p),
+        # A.ChannelShuffle(p=p),
+        A.CLAHE(p=p),
+        A.ColorJitter(p=p),
+        A.Equalize(p=p),
+        A.FancyPCA(p=p),
+        A.GaussianBlur(p=p),
+        A.GaussNoise(p=p),
+        A.GlassBlur(p=p),
+        A.HueSaturationValue(p=p),
+        # A.InvertImg(p=p),
+        A.MedianBlur(p=p),
+        A.MotionBlur(p=p),
+        A.MultiplicativeNoise(p=p),
+        A.Posterize(num_bits=6, p=p),
+        A.RandomBrightnessContrast(p=p),
+        # A.RandomSnow(p=p),
+        # A.RandomSunFlare(p=p),
+        A.RGBShift(p=p),
+        # A.Solarize(p=p),
+        A.ToGray(p=p)]
     )
     return transform
 
-def make_background_augmentation():
-    return make_strong_augmentation()
+def make_background_augmentation(p=0.5):
+    transform = A.Compose([
+        A.Blur(p=p),
+        A.ChannelShuffle(p=p),
+        A.CLAHE(p=p),
+        A.ColorJitter(p=p),
+        A.Equalize(p=p),
+        A.FancyPCA(p=p),
+        A.Flip(p=p),
+        A.GaussianBlur(p=p),
+        A.GaussNoise(p=p),
+        A.GlassBlur(p=p),
+        A.HorizontalFlip(p=p),
+        A.HueSaturationValue(p=p),
+        # A.InvertImg(p=p),
+        A.MedianBlur(p=p),
+        A.MotionBlur(p=p), # ADDED!
+        A.MultiplicativeNoise(p=p),
+        A.Posterize(num_bits=6, p=p),
+        A.RandomBrightnessContrast(p=p),
+        # A.RandomSnow(p=p),
+        A.RandomSunFlare(p=p),
+        A.RGBShift(p=p),
+        A.ToGray(p=p),
+        A.VerticalFlip(p=p)]
+    )
+    return transform
