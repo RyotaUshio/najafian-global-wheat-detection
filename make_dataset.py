@@ -2,8 +2,10 @@
 import argparse
 import pathlib
 import os
+import sys
 import errno
 import time
+import re
 from collections import defaultdict, namedtuple
 from tqdm import tqdm
 import torch
@@ -98,6 +100,11 @@ def parse_args():
         help='When specified, try to use cuda if available', 
         action='store_true'
     )
+    parser.add_argument(
+        '-r', '--resume',
+        help='When specified, resume from where you left off',
+        action='store_true'
+    )
 
     args = parser.parse_args()
     if not args.extension.startswith('.'):
@@ -110,6 +117,17 @@ def parse_args():
             if key in ['mask', 'rep', 'field', 'back', 'labels']:
                 if not args_dict[key].exists():
                     raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
+            elif args_dict[key] is not None:
+                if args_dict[key].exists() and not args.resume:
+                    while True:
+                        ans = input(f'{args_dict[key]} already exists. Are you sure to overwrite? (y/n) --> ')
+                        if ans in ['y', 'yes', 'n', 'no']:
+                            break
+                    if ans.startswith('n'):
+                        sys.exit(1)
+                elif not args_dict[key].exists() and args.resume():
+                    raise RuntimeError(f'cannot resume working on {args_dict[key]}: no such directory')
+
     return args
 
 def make_path(args):
@@ -164,6 +182,19 @@ def make_division(n_sample, *args):
         divisions.ravel()[i] += 1
     return divisions
 
+def get_last_indices(pathes):
+    counts = defaultdict(lambda: defaultdict(int))
+    reps = list(set([rep.stem[:-5] for rep in pathes.rep_dir.glob('*.png')]))
+    for rep in reps:
+        for back in pathes.back_dir.iterdir():
+            head = f'synth_back_{back.stem}_field_{rep}_'
+            key = lambda p: int(re.match(head + r'(\d+)', p.stem).groups()[0])
+            try:
+                counts[back.stem][rep] = max(map(key, pathes.output_images_dir.glob(head + '*')))
+            except ValueError:
+                continue
+    return {k: dict(v) for k, v in counts.items()}
+
 
 def main():
     args = parse_args()
@@ -179,6 +210,11 @@ def main():
     classes = utils.get_classes(args.labels)
     n_class = len(classes)
     logger('done')
+
+    if args.resume:
+        logger('searching for where you left off...', end='')
+        last_indices = get_last_indices(p)
+        logger('done')
 
     # class probabilities
     if args.probability:
@@ -222,8 +258,20 @@ def main():
             for i, back_video in enumerate(back_videos):
                 with back_video.open():
                     for j, field_video in enumerate(field_videos_with_rep_images):
-                        for index in range(division[i, j]):
-                            mkdata.make_composite_image(
+                        if args.resume:
+                            try:
+                                last_index = last_indices[back_video.stem][field_video.stem]
+                            except KeyError:
+                                last_index = -1
+                            start_index = last_index + 1
+                            if start_index > division[i, j]:
+                                raise ValueError(f'it seems like more than {args.n_sample} samples have already been generated')
+                            n_sample_generated += start_index
+                            pbar.update(start_index)
+                        else:
+                            start_index = 0
+                        for index in range(start_index, division[i, j]):
+                            mkdata.make_fomposite_image(
                                 field_video=field_video, 
                                 back_video=back_video, 
                                 pathes=p, 
@@ -232,10 +280,11 @@ def main():
                                 device=device,
                                 index=index
                             )
+                            time.sleep(0.3)
                             n_sample_generated += 1
                             pbar.update(1)
-                            if n_sample_generated >= args.n_sample:
-                                raise StopIteration
+                            # if n_sample_generated >= args.n_sample: # これいらないのでは？
+                            #     raise StopIteration
     except KeyboardInterrupt:
         logger('interrupted by keyboard')
     except StopIteration:

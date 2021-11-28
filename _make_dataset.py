@@ -497,7 +497,7 @@ class HasNoRepImage(Exception):
     """raised when a given FieldVideo object has no RepImage objects in it.
     """
 
-def make_composite_image(*, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, prob: Union[List[float], None], args: argparse.Namespace, device: , index: int):
+def make_composite_image(*, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, prob: Union[List[float], None], args: argparse.Namespace, device, index: int):
     frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations
     frame, label = synthesize(frame=frame, field_video=field_video, prob=prob, device=device)
 
