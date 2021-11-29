@@ -12,7 +12,7 @@ from typing import ClassVar, Callable, Iterable, Union, Dict, List
 import time
 from collections import OrderedDict, defaultdict, namedtuple
 import contextlib
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import utils
 
@@ -496,6 +496,7 @@ def background_augmentation(frame: Union[np.ndarray, torch.Tensor]):
 class HasNoRepImage(Exception):
     """raised when a given FieldVideo object has no RepImage objects in it.
     """
+
 
 def make_composite_image(*, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, prob: Union[List[float], None], args: argparse.Namespace, device, index: int):
     frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations

@@ -7,7 +7,7 @@ import errno
 import time
 import re
 from collections import defaultdict, namedtuple
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import torch
 import numpy as np
 
@@ -257,7 +257,7 @@ def main():
         if args.resume:
             n_sample_generated = sum([sum(v.values()) for v in start_indices.values()])
             initial = n_sample_generated
-        with tqdm(initial=initial, total=args.n_sample) as pbar:
+        with tqdm(initial=initial, total=args.n_sample, dynamic_ncols=True) as pbar:
             for i, back_video in enumerate(back_videos):
                 with back_video.open():
                     for j, field_video in enumerate(field_videos_with_rep_images):
@@ -285,7 +285,7 @@ def main():
         logger('generating images & labels for the first step of domain adaptation...')
         n_rep_image = sum([len(video.rep_images) for video in field_videos])
         try:
-            with tqdm(total=n_rep_image * 360) as pbar:
+            with tqdm(total=n_rep_image * 360, dynamic_ncols=True) as pbar:
                 for field_video in field_videos:
                     for rep_image in field_video.rep_images:
                         mkdata.make_rotated_rep_image(rep_image, pathes=p, bbox=args.bbox, pbar=pbar)
