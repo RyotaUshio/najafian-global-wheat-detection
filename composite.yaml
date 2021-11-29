@@ -1,0 +1,7 @@
+path: /content/drive/MyDrive/chestnut-detection/datasets/20211121/composite
+train: images/all
+val: images/all
+test:
+
+nc: 4
+names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut']
