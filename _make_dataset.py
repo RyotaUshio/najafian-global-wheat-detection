@@ -470,7 +470,7 @@ def foreground_augmentation(field_video: FieldVideo):
     Albumentations cannot deal with images on GPUs.
     """
     images = []
-    transform = utils.make_foreground_augmentation(p=0.15)
+    transform = utils.make_foreground_augmentation(p=0.08)
     for rep_image in field_video.rep_images:
         transformed = transform(image=utils.tensorimage_to_numpy(rep_image.image))
         image = transformed['image']
@@ -487,7 +487,7 @@ def background_augmentation(frame: Union[np.ndarray, torch.Tensor]):
     """
     if isinstance(frame, torch.Tensor):
         frame = utils.tensorimage_to_numpy(frame)
-    transform = utils.make_background_augmentation(p=0.15)
+    transform = utils.make_background_augmentation(p=0.08)
     transformed = transform(image=frame)
     image = transformed['image']
     image = utils.numpyimage_to_tensor(image)

@@ -182,18 +182,18 @@ def make_division(n_sample, *args):
         divisions.ravel()[i] += 1
     return divisions
 
-def get_last_indices(pathes):
-    counts = defaultdict(lambda: defaultdict(int))
+def get_start_indices(pathes):
+    start_indices = defaultdict(lambda: defaultdict(int))
     reps = list(set([rep.stem[:-5] for rep in pathes.rep_dir.glob('*.png')]))
     for rep in reps:
         for back in pathes.back_dir.iterdir():
             head = f'synth_back_{back.stem}_field_{rep}_'
             key = lambda p: int(re.match(head + r'(\d+)', p.stem).groups()[0])
             try:
-                counts[back.stem][rep] = max(map(key, pathes.output_images_dir.glob(head + '*')))
+                start_indices[back.stem][rep] = max(map(key, pathes.output_images_dir.glob(head + '*'))) + 1 # start_index = last_index + 1
             except ValueError:
                 continue
-    return {k: dict(v) for k, v in counts.items()}
+    return start_indices # {k: dict(v) for k, v in start_indices.items()}
 
 
 def main():
@@ -213,7 +213,7 @@ def main():
 
     if args.resume:
         logger('searching for where you left off...', end='')
-        last_indices = get_last_indices(p)
+        start_indices = get_start_indices(p)
         logger('done')
 
     # class probabilities
@@ -253,25 +253,22 @@ def main():
         field_videos_with_rep_images
     ) # make optimal divisions
     try:
-        with tqdm(total=args.n_sample) as pbar:
-            n_sample_generated = 0
+        initial = 0
+        if args.resume:
+            n_sample_generated = sum([sum(v.values()) for v in start_indices.values()])
+            initial = n_sample_generated
+        with tqdm(initial=initial, total=args.n_sample) as pbar:
             for i, back_video in enumerate(back_videos):
                 with back_video.open():
                     for j, field_video in enumerate(field_videos_with_rep_images):
                         if args.resume:
-                            try:
-                                last_index = last_indices[back_video.stem][field_video.stem]
-                            except KeyError:
-                                last_index = -1
-                            start_index = last_index + 1
+                            start_index = start_indices[back_video.stem][field_video.stem] # last_index + 1 if key exists, 0 otherwise
                             if start_index > division[i, j]:
                                 raise ValueError(f'it seems like more than {args.n_sample} samples have already been generated')
-                            n_sample_generated += start_index
-                            pbar.update(start_index)
                         else:
                             start_index = 0
                         for index in range(start_index, division[i, j]):
-                            mkdata.make_fomposite_image(
+                            mkdata.make_composite_image(
                                 field_video=field_video, 
                                 back_video=back_video, 
                                 pathes=p, 
@@ -280,15 +277,9 @@ def main():
                                 device=device,
                                 index=index
                             )
-                            time.sleep(0.3)
-                            n_sample_generated += 1
                             pbar.update(1)
-                            # if n_sample_generated >= args.n_sample: # これいらないのでは？
-                            #     raise StopIteration
     except KeyboardInterrupt:
         logger('interrupted by keyboard')
-    except StopIteration:
-        logger('done')
 
     if args.domain_adaptation is not None:
         logger('generating images & labels for the first step of domain adaptation...')
