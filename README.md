@@ -67,6 +67,7 @@ project_root
 ```
 python make_dataset.py -n [n_sample] -p [prob_1 prob_2 ... prob_n_class] --root path/to/project_root -o composite --verbose --bbox --cuda  --domain-adaptation domain_adaptation_1
 ```
+![](https://user-images.githubusercontent.com/72342591/143833403-e48f71d2-4870-40f7-bb9e-a7bfed6f4eec.png)
 You will see two datasets `composite` and `domain_adaptation_1` have been made.
 
 6. Make `.yaml` file for YOLOv5 training with the dataset you've made.
