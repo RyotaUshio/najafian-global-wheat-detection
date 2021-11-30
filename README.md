@@ -7,9 +7,10 @@ Python>=3.6.0
 NumPy>=??  
 PyTorch>=1.7  
 OpenCV>=??  
-Albumentation>=1.1.0  
+Albumentation>=1.1.0
 
 ## Preparing datasets
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/RyotaUshio/chestnut-detection/blob/master/0_generate_dataset.ipynb)
 
 1. Prepare your videos. Put video clips of backgrounds in `back` directory, fields in `field`.
 
@@ -94,6 +95,7 @@ names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut']
 ```
 
 ## Train your model
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/RyotaUshio/chestnut-detection/blob/master/1_train_with_composite.ipynb)
 
 7. Train YOLOv5.
 ```

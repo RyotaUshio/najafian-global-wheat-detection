@@ -125,7 +125,7 @@ def parse_args():
                             break
                     if ans.startswith('n'):
                         sys.exit(1)
-                elif not args_dict[key].exists() and args.resume():
+                elif not args_dict[key].exists() and args.resume:
                     raise RuntimeError(f'cannot resume working on {args_dict[key]}: no such directory')
 
     return args

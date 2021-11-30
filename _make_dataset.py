@@ -83,7 +83,7 @@ def bbox_to_yolo(bbox: dict, *, image_width: int, image_height: int):
     """
     x_min, y_min, x_max, y_max = bbox_to_pascal_voc(bbox)
     x_center = 0.5 * (x_min + x_max)
-    y_center = 0.5 * (y_min+ y_max)
+    y_center = 0.5 * (y_min + y_max)
     width = x_max - x_min
     height = y_max - y_min
 
@@ -92,6 +92,8 @@ def bbox_to_yolo(bbox: dict, *, image_width: int, image_height: int):
     y_center /= image_height
     width /= image_width
     height /= image_height
+
+    assert all([0<= val <=1] for val in [x_center, y_center, width, height])
 
     return x_center, y_center, width, height
 
@@ -420,10 +422,14 @@ class ForegroundObject:
     
 
 class YoloLabel:
-    def __init__(self, image):
+    def __init__(self, image: Union[torch.Tensor, np.ndarray]):
         self.bboxes = []
-        self.image_width = float(image.shape[-1])
-        self.image_height = float(image.shape[-2])
+        if isinstance(image, torch.Tensor):
+            self.image_width = float(image.shape[-1])
+            self.image_height = float(image.shape[-2])
+        else:
+            self.image_width = float(image.shape[-2])
+            self.image_height = float(image.shape[-3])
         self.dicts = []
 
     def add(self, *, obj: ForegroundObject=None, i_class: int=None, bbox: dict=None):
