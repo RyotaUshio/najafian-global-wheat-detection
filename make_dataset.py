@@ -80,53 +80,63 @@ def parse_args():
         type=float
     )
     parser.add_argument(
-        '-e', '--extension', 
-        help='extension(s) of image files', 
+        '-s', '--suffix', 
+        help='suffix of output image files',
         nargs='?', 
-        default='.png'
+        default='.jpeg'
     )
     parser.add_argument(
         '-v', '--verbose', 
-        help='When specified, display the progress and time remaining', 
+        help='when specified, display the progress and time remaining', 
         action='store_true'
     )
     parser.add_argument(
         '-b', '--bbox', 
-        help='When specified, images with calculated bounding boxes are also saved', 
+        help='when specified, images with calculated bounding boxes are also saved', 
         action='store_true'
     )
     parser.add_argument(
         '-c', '--cuda', 
-        help='When specified, try to use cuda if available', 
+        help='when specified, try to use cuda if available', 
         action='store_true'
     )
     parser.add_argument(
         '-r', '--resume',
-        help='When specified, resume from where you left off',
+        help='when specified, resume from where you left off',
         action='store_true'
+    )
+    parser.add_argument(
+        '-a', '--augment', '--augment-intensity',
+        help='(floating point number between 0.0 and 1.0) intensity of data augmentation applied to foreground and background images',
+        type=float,
+        default=0.1
     )
 
     args = parser.parse_args()
-    if not args.extension.startswith('.'):
-        args.extension = '.' + args.extension
-    if args.root is not None:
-        args_dict = vars(args)
-        for key in ['mask', 'rep', 'field', 'back', 'output', 'domain_adaptation', 'labels']:
+    args.suffix = utils.with_dot(args.suffix)
+    args_dict = vars(args)
+    keys = ['mask', 'rep', 'field', 'back', 'output', 'domain_adaptation', 'labels']
+    if args.root is not None: # prepend args.root to each path
+        for key in keys:
             if args_dict[key] is not None:
                 args_dict[key] = args.root / args_dict[key]
-            if key in ['mask', 'rep', 'field', 'back', 'labels']:
-                if not args_dict[key].exists():
-                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
-            elif args_dict[key] is not None:
-                if args_dict[key].exists() and not args.resume:
-                    while True:
-                        ans = input(f'{args_dict[key]} already exists. Are you sure to overwrite? (y/n) --> ')
-                        if ans in ['y', 'yes', 'n', 'no']:
-                            break
-                    if ans.startswith('n'):
-                        sys.exit(1)
-                elif not args_dict[key].exists() and args.resume:
-                    raise RuntimeError(f'cannot resume working on {args_dict[key]}: no such directory')
+    for key in keys:
+        if key in ['mask', 'rep', 'field', 'back', 'labels']: # existence check
+            if not args_dict[key].exists():
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
+        elif args_dict[key] is not None: # args.domain_adaptation might be None
+            if args_dict[key].exists() and not args.resume:
+                while True:
+                    ans = input(f'{args_dict[key]} already exists. Are you sure to overwrite? (y/n) --> ')
+                    if ans in ['y', 'yes', 'n', 'no']:
+                        break
+                if ans.startswith('n'):
+                    sys.exit(1)
+            elif not args_dict[key].exists() and args.resume:
+                raise RuntimeError(f'cannot resume working on {args_dict[key]}: no such directory')
+    
+    if args.augment < 0.0 or 1.0 < args.augment:
+        raise ValueError(f'augment must be between 0.0 and 1.0, got {args.augment}')
 
     return args
 
@@ -195,6 +205,9 @@ def get_start_indices(pathes):
                 continue
     return start_indices # {k: dict(v) for k, v in start_indices.items()}
 
+class NoJobToDo(Exception):
+    pass
+
 
 def main():
     args = parse_args()
@@ -227,20 +240,23 @@ def main():
     # generate objects of FieldVideo, RepImage, ForegroundObject, BackgroundVideo
     logger('constructing asset objects...', end='')
     field_videos = []
-    for p_video in p.field_dir.glob('*.mp4'):
-        video = mkdata.FieldVideo(
-            p_video=p_video,
-            p_rep_images=p.rep_dir,
-            p_masks=p.mask_dir,
-            rep_image_extension=args.extension,
-            classes=classes
-        )
-        field_videos.append(video)
+    for suffix in utils.VID_FORMATS:
+        suffix = utils.with_dot(suffix)
+        for p_video in p.field_dir.glob(f'*{suffix}'):
+            video = mkdata.FieldVideo(
+                p_video=p_video,
+                p_rep_images=p.rep_dir,
+                p_masks=p.mask_dir,
+                classes=classes
+            )
+            field_videos.append(video)
 
     back_videos = []
-    for p_video in p.back_dir.glob('*.mp4'):
-        video = mkdata.BackgroundVideo(p_video=p_video)
-        back_videos.append(video)        
+    for suffix in utils.VID_FORMATS:
+        suffix = utils.with_dot(suffix)
+        for p_video in p.back_dir.glob(f'*{suffix}'):
+            video = mkdata.BackgroundVideo(p_video=p_video)
+            back_videos.append(video)        
     logger('done')
 
     # simulate datasets for each pair of (a background video, set of foregound objects in a video)
@@ -257,6 +273,8 @@ def main():
         if args.resume:
             n_sample_generated = sum([sum(v.values()) for v in start_indices.values()])
             initial = n_sample_generated
+            if n_sample_generated >= args.n_sample:
+                raise NoJobToDo(f'{n_sample_generated} samples have already been generated.')
         with tqdm(initial=initial, total=args.n_sample, dynamic_ncols=True) as pbar:
             for i, back_video in enumerate(back_videos):
                 with back_video.open():
@@ -273,13 +291,19 @@ def main():
                                 back_video=back_video, 
                                 pathes=p, 
                                 prob=prob,
-                                args=args, 
+                                suffix=args.suffix,
+                                bbox=args.bbox,
                                 device=device,
+                                augment_intensity=args.augment,
                                 index=index
                             )
                             pbar.update(1)
     except KeyboardInterrupt:
         logger('interrupted by keyboard')
+    except NoJobToDo as e:
+        logger(e)
+    else:
+        logger('done')
 
     if args.domain_adaptation is not None:
         logger('generating images & labels for the first step of domain adaptation...')
@@ -288,7 +312,7 @@ def main():
             with tqdm(total=n_rep_image * 360, dynamic_ncols=True) as pbar:
                 for field_video in field_videos:
                     for rep_image in field_video.rep_images:
-                        mkdata.make_rotated_rep_image(rep_image, pathes=p, bbox=args.bbox, pbar=pbar)
+                        mkdata.make_rotated_rep_image(rep_image, pathes=p, bbox=args.bbox, suffix=args.suffix, pbar=pbar)
         except KeyboardInterrupt:
             logger('interrupted by keyboard')
         else:

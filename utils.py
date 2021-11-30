@@ -7,6 +7,17 @@ import time
 import sys
 import os
 
+# acceptable image/video suffixes: same as YOLOv5
+IMG_FORMATS = ['.bmp', '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng', '.webp', '.mpo']
+VID_FORMATS = ['.mov', '.avi', '.mp4', '.mpg', '.mpeg', '.m4v', '.wmv', '.mkv']
+
+def with_dot(suffix):
+    """ensure that a suffix starts with a period.
+    """
+    if not suffix.startswith('.'):
+        suffix = '.' + suffix
+    return suffix
+
 def get_classes(p_labels):
     classes = []
     with open(p_labels) as f:
@@ -157,6 +168,7 @@ def make_background_augmentation(p=0.5):
     transform = A.Compose([
         A.Blur(p=p),
         A.ChannelShuffle(p=p),
+        A.ChannelDropout(p=p),
         A.CLAHE(p=p),
         A.ColorJitter(p=p),
         A.Equalize(p=p),
@@ -171,9 +183,9 @@ def make_background_augmentation(p=0.5):
         A.MedianBlur(p=p),
         A.MotionBlur(p=p), # ADDED!
         A.MultiplicativeNoise(p=p),
-        A.Posterize(num_bits=6, p=p),
+        A.Posterize(num_bits=4, p=p),
         A.RandomBrightnessContrast(p=p),
-        # A.RandomSnow(p=p),
+        A.RandomSnow(p=p),
         A.RandomSunFlare(p=p),
         A.RGBShift(p=p),
         A.ToGray(p=p),

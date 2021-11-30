@@ -16,6 +16,8 @@ from tqdm.auto import tqdm
 
 import utils
 
+IMAGE_SUFFIXES = ['.png', '.jpeg', '.jpg', '.bmp', ] # acceptable suffixes of image files
+
 _patterns = [
   re.compile(r'(.+)_(\d{4})(\..+)'),
   re.compile(r'(.+)(\..+)')
@@ -193,7 +195,6 @@ class BackgroundVideo(Video):
 class FieldVideo(Video):
     p_rep_images: dataclasses.InitVar[pathlib.Path]
     p_masks: dataclasses.InitVar[pathlib.Path]
-    rep_image_extension: dataclasses.InitVar[str]
     classes: List[str]
     device: dataclasses.InitVar[Union[str, torch.device]] = 'cpu'
 
@@ -203,8 +204,7 @@ class FieldVideo(Video):
     def __post_init__(
         self, 
         p_rep_images: pathlib.Path, 
-        p_masks: pathlib.Path, 
-        rep_image_extension: str, 
+        p_masks: pathlib.Path,
         device: Union[str, torch.device]
     ):
         super().__post_init__()
@@ -212,14 +212,11 @@ class FieldVideo(Video):
         self.p_video = pathlib.Path(self.p_video)
         p_rep_images = pathlib.Path(p_rep_images)
         p_masks = pathlib.Path(p_masks)
-        assert isinstance(rep_image_extension, str)
-
-        if not rep_image_extension.startswith('.'):
-            rep_image_extension += '.' + rep_image_extension
-        for p_rep_image in p_rep_images.glob(f'{self.stem}_*{rep_image_extension}'):
-            p_mask = p_masks / (p_rep_image.stem + '.npy')
-            image = RepImage(p_image=p_rep_image, p_mask=p_mask, video=self, classes=self.classes, device=device, stem=self.stem)
-            self.rep_images.append(image)
+        for suffix in utils.IMG_FORMATS:
+            for p_rep_image in p_rep_images.glob(f'{self.stem}_*{suffix}'):
+                p_mask = p_masks / (p_rep_image.stem + '.npy')
+                image = RepImage(p_image=p_rep_image, p_mask=p_mask, video=self, classes=self.classes, device=device, stem=self.stem)
+                self.rep_images.append(image)
         self.orig_images = [rep_image.orig_image for rep_image in self.rep_images] # make copy for rep_image_as()
 
     @contextlib.contextmanager
@@ -467,7 +464,7 @@ class YoloLabel:
         return [classes[bbox['i_class']] for bbox in self.bboxes]
 
 
-def foreground_augmentation(field_video: FieldVideo):
+def foreground_augmentation(field_video: FieldVideo, intensity: float):
     """apply data augmentation to all the representative images of the given field video.
 
     Note
@@ -476,7 +473,7 @@ def foreground_augmentation(field_video: FieldVideo):
     Albumentations cannot deal with images on GPUs.
     """
     images = []
-    transform = utils.make_foreground_augmentation(p=0.08)
+    transform = utils.make_foreground_augmentation(p=intensity)
     for rep_image in field_video.rep_images:
         transformed = transform(image=utils.tensorimage_to_numpy(rep_image.image))
         image = transformed['image']
@@ -484,7 +481,7 @@ def foreground_augmentation(field_video: FieldVideo):
         images.append(image)
     return images
 
-def background_augmentation(frame: Union[np.ndarray, torch.Tensor]):
+def background_augmentation(frame: Union[np.ndarray, torch.Tensor], intensity: float):
     """apply data augmentation to the given frame of a background video.
 
     Note
@@ -493,7 +490,7 @@ def background_augmentation(frame: Union[np.ndarray, torch.Tensor]):
     """
     if isinstance(frame, torch.Tensor):
         frame = utils.tensorimage_to_numpy(frame)
-    transform = utils.make_background_augmentation(p=0.08)
+    transform = utils.make_background_augmentation(p=intensity)
     transformed = transform(image=frame)
     image = transformed['image']
     image = utils.numpyimage_to_tensor(image)
@@ -504,22 +501,25 @@ class HasNoRepImage(Exception):
     """
 
 
-def make_composite_image(*, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, prob: Union[List[float], None], args: argparse.Namespace, device, index: int):
+def make_composite_image(
+        *, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, 
+        prob: Union[List[float], None], suffix: str, bbox: bool, device, augment_intensity: float, index: int
+    ):
     frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations
-    frame, label = synthesize(frame=frame, field_video=field_video, prob=prob, device=device)
+    frame, label = synthesize(frame=frame, field_video=field_video, prob=prob, augment_intensity=augment_intensity, device=device)
 
     # save as files
     output_stem = f'synth_back_{back_video.stem}_field_{field_video.stem}_{index}'
-    output_image_name = pathes.output_images_dir / (output_stem + args.extension)
+    output_image_name = pathes.output_images_dir / (output_stem + utils.with_dot(suffix))
     output_label_name = pathes.output_labels_dir / (output_stem + '.txt')
     utils.save_image(frame, output_image_name)
     label.save(output_label_name)
 
-    if args.bbox:
+    if bbox:
         output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
         utils.save_labeled_image(frame, label, output_labeled_image_name, field_video.classes)
 
-def synthesize(*, frame, field_video, prob=None, device='cpu'):
+def synthesize(*, frame, field_video, augment_intensity: float, prob: None, device='cpu'):
     """randomly place foreground objects onto the given frame in-place
 
     frame: a frame taken from a background video
@@ -537,8 +537,8 @@ def synthesize(*, frame, field_video, prob=None, device='cpu'):
     n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
     n_class = len(field_video.classes)
     label = YoloLabel(frame)
-    rep_images_aug = foreground_augmentation(field_video)
-    frame_aug = background_augmentation(frame)
+    rep_images_aug = foreground_augmentation(field_video, augment_intensity)
+    frame_aug = background_augmentation(frame, augment_intensity)
 
     with field_video.rep_images_as(rep_images_aug):
         for _ in range(n_obj):
@@ -557,14 +557,14 @@ def synthesize(*, frame, field_video, prob=None, device='cpu'):
 
     return frame_aug, label
 
-def make_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: bool, pbar: tqdm):
+def make_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: bool, suffix: str, pbar: tqdm):
     n_class = len(rep_image.classes)
     concat = torch.cat([rep_image.image, rep_image.classwise_mask])
     
     for degree in range(360):
         image, label = _make_rotated_rep_image_impl(concat, degree=degree, n_class=n_class)
         output_stem = f'{rep_image.p_image.stem}_{degree:03}degrees'
-        output_image_name = pathes.output_domain_adaptation_images_dir / (output_stem + rep_image.p_image.suffix)
+        output_image_name = pathes.output_domain_adaptation_images_dir / (output_stem + utils.with_dot(suffix))
         output_label_name = pathes.output_domain_adaptation_labels_dir / (output_stem + '.txt')
         utils.save_image(image, output_image_name)
         label.save(output_label_name)
