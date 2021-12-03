@@ -25,16 +25,16 @@ def cfg_dataset(cfg):
 
     if texts:
         for text in texts:
-            cfg_dataset_internal(text, cfg, text=True)
+            cfg_dataset_internal(text, path, cfg, text=True)
     else:
         path_images = path / 'images'
         for p in path_images.iterdir():
             if p.is_dir():
-                cfg_dataset_internal(p, cfg, text=False)
+                cfg_dataset_internal(p, path, cfg, text=False)
 
     assert all([name in cfg for name in ['train', 'val']])
 
-def cfg_dataset_internal(path: pathlib.Path, cfg: dict, text: bool) -> None:
+def cfg_dataset_internal(path: pathlib.Path, root: pathlib.Path, cfg: dict, text: bool) -> None:
     names = ['train', 'val', 'test']
     matched= False
     for name in names:
@@ -45,7 +45,7 @@ def cfg_dataset_internal(path: pathlib.Path, cfg: dict, text: bool) -> None:
         return 
     if name in cfg:
         raise RuntimeError(f'multiple candidates exist for a {name} {"text file" if text else "directory"}: {cfg[name]} and {path}')
-    cfg.update({name: str(path)})
+    cfg.update({name: str(path.relative_to(root))})
 
 def cfg_classes(cfg, path_labels):
     classes = []

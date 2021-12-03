@@ -117,7 +117,6 @@ def main():
   p_out = pathlib.Path(args.output)
   p_out.mkdir(parents=True, exist_ok=True)
 
-  # divide into (train+val) and test
   images = get_image_list(p_images_all)
   n_image_all = len(images)
   if size_spec == 'abs':
@@ -157,12 +156,8 @@ def main():
       elif args.move:
         shutil.move(str(p_image), str(p_images_division))
         shutil.move(str(p_label), str(p_labels_division))
-      if args.move or args.copy:
-        p_image_after = p_images_division / image_name
-      else:
-        p_image_after = p_image
       if args.text:
-        f.write(str(p_image_after) + '\n')
+        f.write(str(p_image) + '\n')
 
 if __name__ == '__main__':
   main()

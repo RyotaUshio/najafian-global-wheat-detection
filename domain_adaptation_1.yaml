@@ -1,0 +1,9 @@
+# Train/val/test sets
+path: ../datasets/20211121/domain_adaptation_1 # dataset root dir
+train: images/all # train images
+test: ../../20210821/test.txt # test images
+val: ../../20210821/val.txt # val images
+
+# Classes
+nc: 4 # number of classes
+names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut'] # class names

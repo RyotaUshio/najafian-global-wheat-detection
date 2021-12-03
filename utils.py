@@ -2,6 +2,7 @@ import torch
 import torchvision
 import cv2
 import albumentations as A
+import matplotlib.pyplot as plt
 import pathlib
 import time
 import sys
@@ -78,15 +79,49 @@ def save_image(tensor, fname):
         tensor /= 255.0
     torchvision.utils.save_image(tensor, fname)
 
+def get_labeled_image(image, label, classes):
+    return torchvision.utils.draw_bounding_boxes(
+        image=image.cpu(),
+        boxes=label.to_tensor(),
+        labels=label.class_name_list(classes)
+    )
+
 def save_labeled_image(image, label, output_labeled_image_name, classes):
     save_image(
-        torchvision.utils.draw_bounding_boxes(
-            image=image.cpu(),
-            boxes=label.to_tensor(),
-            labels=label.class_name_list(classes)
-        ),
+        get_labeled_image(image, label, classes),
         output_labeled_image_name,
     )
+
+def show_image(tensor, mask=None):
+    if tensor.ndim == 2:
+        tensor = tensor[None]
+    if mask is not None:
+        tensor = apply_mask(tensor, mask)
+    ndarr = tensor.numpy().transpose((1, 2, 0))
+    if ndarr.shape[-1] == 1:
+        ndarr = ndarr[:, :, 0]
+    plt.imshow(ndarr)
+    plt.axis('off')
+    plt.tight_layout()
+
+def apply_mask(image, mask):
+    if image.ndim == 3:
+        mask = mask[None]
+    return image * mask
+
+def make_mask_grid(image, classwise_mask, objectwise_mask, i_class):
+    objs = objectwise_mask[i_class]
+    image_class_mask = apply_mask(image, classwise_mask[i_class])
+    image_object_masks = [apply_mask(image, obj) for obj in objs]
+    grid = torchvision.utils.make_grid(
+        [image, image_class_mask] + image_object_masks,
+        pad_value=0.5
+    ) 
+    return grid
+
+def show_labeled_image(image, label, classes):
+    labeled_image = get_labeled_image(image, label, classes)
+    show_image(labeled_image)
 
 def make_logger(*, verbose):
     def log(*args, **kwargs):

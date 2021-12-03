@@ -7,6 +7,7 @@ import skimage.measure
 import pathlib
 import re
 import argparse
+import warnings
 import dataclasses
 from typing import ClassVar, Callable, Iterable, Union, Dict, List
 import time
@@ -98,6 +99,18 @@ def bbox_to_yolo(bbox: dict, *, image_width: int, image_height: int):
     assert all([0<= val <=1] for val in [x_center, y_center, width, height])
 
     return x_center, y_center, width, height
+
+def yolo_to_pascal_voc(bbox: dict, *, image_width: int, image_height: int):
+    x_center, y_center, width, height = bbox['x_center'], bbox['y_center'], bbox['width'], bbox['height']
+    left = x_center - 0.5 * width
+    left = int(left * image_width + 0.5)
+    right = x_center + 0.5 * width
+    right = int(right * image_width + 0.5)
+    top = y_center - 0.5 * height
+    top = int(top * image_height + 0.5)
+    bottom = y_center + 0.5 * height
+    bottom = int(bottom * image_height + 0.5)
+    return dict(left=left, right=right, top=top, bottom=bottom)
 
 def make_classwise_mask(p_mask, n_class):
     """p_mask: path to .npy file which contains class-wise masks in the VOC format
@@ -419,15 +432,28 @@ class ForegroundObject:
     
 
 class YoloLabel:
-    def __init__(self, image: Union[torch.Tensor, np.ndarray]):
+    def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width=None, image_height=None, min_area=None):
+        self._validate_args(image=image, image_width=image_width, image_height=image_height)
         self.bboxes = []
         if isinstance(image, torch.Tensor):
             self.image_width = float(image.shape[-1])
             self.image_height = float(image.shape[-2])
-        else:
+        elif isinstance(image, np.ndarray):
             self.image_width = float(image.shape[-2])
             self.image_height = float(image.shape[-3])
-        self.dicts = []
+        elif image is not None:
+            raise TypeError('image must be either tensor or ndarray')
+        self.bboxes_voc = []
+        if min_area is None:
+            min_area = 0.0
+        self.min_area = min_area
+
+    @staticmethod
+    def _validate_args(*, image, image_width, image_height):
+        if image is None:
+            assert image_width is not None and image_height is not None
+        else:
+            assert image_width is None and image_height is None
 
     def add(self, *, obj: ForegroundObject=None, i_class: int=None, bbox: dict=None):
         """call with signature of add(obj=obj) or add(i_class=i_class, bbox=bbox)
@@ -439,6 +465,12 @@ class YoloLabel:
         else:
             assert i_class is not None and bbox is not None
             x_center, y_center, width, height = bbox_to_yolo(bbox, image_width=self.image_width, image_height=self.image_height)
+
+        area = width * height
+        if area <= self.min_area:
+            warnings.warn(f'ignore a bounding box whose area is {area} <= min_area')
+            return
+
         self.bboxes.append(
             OrderedDict(
                 i_class=i_class, 
@@ -448,7 +480,44 @@ class YoloLabel:
                 height=height
             )
         )
-        self.dicts.append(bbox)
+        self.bboxes_voc.append(bbox)
+
+    @staticmethod
+    def parse_line(line):
+        vals = line.split()
+        if len(vals) == 6:
+            i_class, x_center, y_center, width, height, conf = vals
+        elif len(vals) == 5:
+            if float(vals[0]).is_integer():
+                i_class, x_center, y_center, width, height = vals
+            else:
+                x_center, y_center, width, height, conf = vals
+        elif len(vals) == 4:
+            x_center, y_center, width, height = vals
+        i_class = int(i_class)
+        x_center = float(x_center)
+        y_center = float(y_center)
+        width = float(width)
+        height = float(height)
+        # conf = float(conf)
+        # genertic situation is not fully considered yet
+        return OrderedDict(i_class=i_class, x_center=x_center, y_center=y_center, width=width, height=height)
+
+    @classmethod
+    def load(cls, fname, *, image=None, image_width=None, image_height=None):
+        path = pathlib.Path(fname)
+        if path.is_dir():
+            return [cls.load(p, image_width=image_width, image_height=image_height) for p in path.glob('*.txt')]
+
+        label = cls(image=image, image_width=image_width, image_height=image_height)
+        with open(path) as f:
+            for line in f:
+                bbox = cls.parse_line(line)
+                label.bboxes.append(bbox)
+                bbox = {k: v for k, v in bbox.items() if k != 'i_class'}
+                bbox_voc = yolo_to_pascal_voc(bbox, image_width=label.image_width, image_height=label.image_height)
+                label.bboxes_voc.append(bbox_voc)
+        return label
 
     def save(self, fname):
         with open(fname, 'w') as f:
@@ -458,7 +527,7 @@ class YoloLabel:
                 f.write(row)
 
     def to_tensor(self):
-        return torch.tensor([[bbox['left'], bbox['top'], bbox['right'], bbox['bottom']] for bbox in self.dicts])
+        return torch.tensor([[bbox['left'], bbox['top'], bbox['right'], bbox['bottom']] for bbox in self.bboxes_voc])
 
     def class_name_list(self, classes):
         return [classes[bbox['i_class']] for bbox in self.bboxes]
@@ -503,10 +572,12 @@ class HasNoRepImage(Exception):
 
 def make_composite_image(
         *, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, 
-        prob: Union[List[float], None], suffix: str, bbox: bool, device, augment_intensity: float, index: int
+        prob: Union[List[float], None], suffix: str, bbox: bool, 
+        # device, 
+        augment_intensity: float, index: int
     ):
     frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations
-    frame, label = synthesize(frame=frame, field_video=field_video, prob=prob, augment_intensity=augment_intensity, device=device)
+    frame, label = synthesize(frame=frame, field_video=field_video, prob=prob, augment_intensity=augment_intensity)# , device=device)
 
     # save as files
     output_stem = f'synth_back_{back_video.stem}_field_{field_video.stem}_{index}'
@@ -519,7 +590,7 @@ def make_composite_image(
         output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
         utils.save_labeled_image(frame, label, output_labeled_image_name, field_video.classes)
 
-def synthesize(*, frame, field_video, augment_intensity: float, prob: None, device='cpu'):
+def synthesize(*, frame, field_video, augment_intensity: float, prob: None):# , device='cpu'):
     """randomly place foreground objects onto the given frame in-place
 
     frame: a frame taken from a background video
@@ -557,23 +628,26 @@ def synthesize(*, frame, field_video, augment_intensity: float, prob: None, devi
 
     return frame_aug, label
 
-def make_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: bool, suffix: str, pbar: tqdm):
+def make_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: bool, suffix: str, pbar: tqdm, min_area:float=None):
     n_class = len(rep_image.classes)
     concat = torch.cat([rep_image.image, rep_image.classwise_mask])
     
     for degree in range(360):
-        image, label = _make_rotated_rep_image_impl(concat, degree=degree, n_class=n_class)
+        image, label = _make_rotated_rep_image_impl(concat, degree=degree, n_class=n_class, min_area=min_area)
         output_stem = f'{rep_image.p_image.stem}_{degree:03}degrees'
-        output_image_name = pathes.output_domain_adaptation_images_dir / (output_stem + utils.with_dot(suffix))
-        output_label_name = pathes.output_domain_adaptation_labels_dir / (output_stem + '.txt')
+        output_image_name = pathes.output_images_dir / (output_stem + utils.with_dot(suffix))
+        output_label_name = pathes.output_labels_dir / (output_stem + '.txt')
+        # output_image_name = pathes.output_domain_adaptation_images_dir / (output_stem + utils.with_dot(suffix))
+        # output_label_name = pathes.output_domain_adaptation_labels_dir / (output_stem + '.txt')
         utils.save_image(image, output_image_name)
         label.save(output_label_name)
         if bbox:
-            output_labeled_image_name = pathes.output_domain_adaptation_labeled_images_dir / output_image_name.name
+            output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
+            # output_labeled_image_name = pathes.output_domain_adaptation_labeled_images_dir / output_image_name.name
             utils.save_labeled_image(image, label, output_labeled_image_name, rep_image.classes)
         pbar.update(1)
             
-def _make_rotated_rep_image_impl(concat, *, degree, n_class):
+def _make_rotated_rep_image_impl(concat, *, degree, n_class, min_area=None):
     """image: Tensor (C, H, W)
     classwise_mask: Tensor (n_class, H, W)
     """
@@ -582,12 +656,27 @@ def _make_rotated_rep_image_impl(concat, *, degree, n_class):
     )
     image, classwise_mask = torch.split(rotated, [3, n_class], dim=0)
     objectwise_mask = make_objectwise_mask(classwise_mask, n_class)
-    label = YoloLabel(image)
+    label = YoloLabel(image, min_area=min_area)
         
     # bounding box info
     for i_class in range(n_class):
         bboxes = get_bbox(objectwise_mask[i_class])
         for bbox in bboxes:
-            label.add(i_class=i_class, bbox=bbox)
-
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                label.add(i_class=i_class, bbox=bbox)
+                
     return image, label
+
+# def make_yolo_labels_from_masks(field_videos, p_output):
+#     p_output = pathlib.Path(p_output)
+#     for field_video in field_videos:
+#         rep_images = field_video.rep_images
+#         if not rep_images:
+#             continue
+#         for rep_image in rep_images:
+#             output_path = pathlib.Path(p_output)
+#             label = YoloLabel(rep_image.image)
+#             for obj in rep_image.objects:
+#                 label.add(obj)
+#             label.save()

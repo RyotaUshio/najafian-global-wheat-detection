@@ -1,0 +1,9 @@
+# Train/val/test sets
+path: ../datasets/20210821/ # dataset root dir
+train: train.txt # train images
+test: test.txt # test images
+val: val.txt # val images
+
+# Classes
+nc: 4 # number of classes
+names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut'] # class names
