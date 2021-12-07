@@ -1,6 +1,6 @@
 path: /content/drive/MyDrive/chestnut-detection/datasets/20211121/composite
 train: images/all
-val: images/all
+val: ../domain_adaptation_1/images/all
 test: ../../20210821/images/all
 
 nc: 4
