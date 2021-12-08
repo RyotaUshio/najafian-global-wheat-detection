@@ -401,7 +401,7 @@ class ForegroundObject:
     def bbox_to_yolo(self):
         return bbox_to_yolo(self.bbox, image_width=self.rep_image.width, image_height=self.rep_image.height)
 
-    def random_place(self, background):
+    def random_place(self, background, return_bbox=True, return_mask=False):
         """Randomly place the object on the given background image. This is an in-place operation.
         
         Parameters
@@ -428,21 +428,54 @@ class ForegroundObject:
         bbox['bottom'] += top
         bbox['left'] += left
         bbox['right'] += left
-        return bbox
-    
 
-class YoloLabel:
-    def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width=None, image_height=None, min_area=None):
+        # mask info
+        mask_info = dict(mask_cropped=mask_cropped, top=top, left=left, i_class=self.i_class)
+
+        if return_bbox:
+            if return_mask:
+                return bbox, mask_info
+            return bbox
+        if return_mask:
+            return mask_info
+
+
+class BaseLabel:
+    def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width:int=None, image_height:int=None, requires_size:bool=True):
         self._validate_args(image=image, image_width=image_width, image_height=image_height)
+        if requires_size:
+            if isinstance(image, torch.Tensor):
+                self.image_width = float(image.shape[-1])
+                self.image_height = float(image.shape[-2])
+            elif isinstance(image, np.ndarray):
+                self.image_width = float(image.shape[-2])
+                self.image_height = float(image.shape[-3])
+            elif image is None:
+                self.image_width = image_width
+                self.image_height = image_height
+            else:
+                raise TypeError('image must be either tensor or ndarray')
+    
+    @staticmethod
+    def _validate_args(*, image, image_width, image_height):
+        if image is None:
+            assert image_width is not None and image_height is not None
+        else:
+            assert image_width is None and image_height is None
+
+class YoloLabel(BaseLabel):
+    def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width:int=None, image_height:int=None, min_area:float=None):
+        super().__init__(image=image, image_width=image_width, image_height=image_height, requires_size=True)
+        # self._validate_args(image=image, image_width=image_width, image_height=image_height)
         self.bboxes = []
-        if isinstance(image, torch.Tensor):
-            self.image_width = float(image.shape[-1])
-            self.image_height = float(image.shape[-2])
-        elif isinstance(image, np.ndarray):
-            self.image_width = float(image.shape[-2])
-            self.image_height = float(image.shape[-3])
-        elif image is not None:
-            raise TypeError('image must be either tensor or ndarray')
+        # if isinstance(image, torch.Tensor):
+        #     self.image_width = float(image.shape[-1])
+        #     self.image_height = float(image.shape[-2])
+        # elif isinstance(image, np.ndarray):
+        #     self.image_width = float(image.shape[-2])
+        #     self.image_height = float(image.shape[-3])
+        # elif image is not None:
+        #     raise TypeError('image must be either tensor or ndarray')
         self.bboxes_voc = []
         if min_area is None:
             min_area = 0.0
@@ -533,6 +566,37 @@ class YoloLabel:
         return [classes[bbox['i_class']] for bbox in self.bboxes]
 
 
+class MaskLabel(BaseLabel):
+    def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width:int=None, image_height:int=None):
+        super().__init__(image=image, image_width=image_width, image_height=image_height, requires_size=True)
+        self.instance_masks = []
+        self.n_class = 0
+
+    def add(self, mask_info: dict):
+        self.instance_masks.append(mask_info)
+        i_class = mask_info['i_class']
+        if i_class >=  self.n_class:
+            self.n_class = i_class + 1
+
+    def to_voc(self, rgb=True):
+        ret = np.zeros((int(self.image_height), int(self.image_width)), dtype=int)
+        for mask_info in self.instance_masks:
+            mask_cropped = mask_info['mask_cropped'].numpy()
+            top = mask_info['top']
+            left = mask_info['left']
+            i_class = mask_info['i_class']
+            h, w = mask_cropped.shape
+            ret[top:top+h, left:left+w][mask_cropped] = i_class + 1
+        if rgb:
+            ret = utils.PASCAL_VOC_CMAP[ret]
+        return utils.numpyimage_to_tensor(ret)
+
+    def save(self, fname):
+        voc = self.to_voc()
+        utils.save_image(voc, fname)
+        #path = pathlib.Path(fname)
+        #np.savetxt(path.parent / (path.stem + '.txt'), voc.numpy())
+
 def foreground_augmentation(field_video: FieldVideo, intensity: float):
     """apply data augmentation to all the representative images of the given field video.
 
@@ -577,14 +641,16 @@ def make_composite_image(
         augment_intensity: float, index: int
     ):
     frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations
-    frame, label = synthesize(frame=frame, field_video=field_video, prob=prob, augment_intensity=augment_intensity)# , device=device)
+    frame, label, mask = synthesize(frame=frame, field_video=field_video, prob=prob, augment_intensity=augment_intensity)# , device=device)
 
     # save as files
     output_stem = f'synth_back_{back_video.stem}_field_{field_video.stem}_{index}'
     output_image_name = pathes.output_images_dir / (output_stem + utils.with_dot(suffix))
     output_label_name = pathes.output_labels_dir / (output_stem + '.txt')
+    output_mask_name = pathes.output_masks_dir / (output_stem + '.jpg')
     utils.save_image(frame, output_image_name)
     label.save(output_label_name)
+    mask.save(output_mask_name)
 
     if bbox:
         output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
@@ -607,7 +673,8 @@ def synthesize(*, frame, field_video, augment_intensity: float, prob: None):# , 
     rng = np.random.default_rng()
     n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
     n_class = len(field_video.classes)
-    label = YoloLabel(frame)
+    yololabel = YoloLabel(frame)
+    masklabel = MaskLabel(frame)
     rep_images_aug = foreground_augmentation(field_video, augment_intensity)
     frame_aug = background_augmentation(frame, augment_intensity)
 
@@ -623,10 +690,11 @@ def synthesize(*, frame, field_video, augment_intensity: float, prob: None):# , 
                         break
             
             obj = rng.choice(objects)
-            bbox = obj.random_place(frame_aug)
-            label.add(i_class=obj.i_class, bbox=bbox)
+            bbox, mask_info = obj.random_place(frame_aug, return_bbox=True, return_mask=True)
+            yololabel.add(i_class=obj.i_class, bbox=bbox)
+            masklabel.add(mask_info)
 
-    return frame_aug, label
+    return frame_aug, yololabel, masklabel
 
 def make_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: bool, suffix: str, pbar: tqdm, min_area:float=None):
     n_class = len(rep_image.classes)

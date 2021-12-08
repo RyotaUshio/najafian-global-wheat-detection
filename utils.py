@@ -1,5 +1,6 @@
 import torch
 import torchvision
+import numpy as np
 import cv2
 import albumentations as A
 import matplotlib.pyplot as plt
@@ -42,7 +43,8 @@ def adjust_opencv(image):
 def numpyimage_to_tensor(ndarr, device=None, opencv=False):
     if opencv:
         ndarr = adjust_opencv(ndarr)
-    ndarr = ndarr.transpose((2, 0, 1)) # (H, W, C) -> (C, H, W)
+    if ndarr.ndim == 3:
+        ndarr = ndarr.transpose((2, 0, 1)) # (H, W, C) -> (C, H, W)
     tensor = torch.as_tensor(ndarr)
     if device is not None:
         tensor = tensor.to(device)
@@ -122,6 +124,30 @@ def make_mask_grid(image, classwise_mask, objectwise_mask, i_class):
 def show_labeled_image(image, label, classes):
     labeled_image = get_labeled_image(image, label, classes)
     show_image(labeled_image)
+
+def color_map(N=256, normalized=False):
+    """https://gist.github.com/wllhf/a4533e0adebe57e3ed06d4b50c8419ae
+    """
+    def bitget(byteval, idx):
+        return ((byteval & (1 << idx)) != 0)
+
+    dtype = 'float32' if normalized else 'uint8'
+    cmap = np.zeros((N, 3), dtype=dtype)
+    for i in range(N):
+        r = g = b = 0
+        c = i
+        for j in range(8):
+            r = r | (bitget(c, 0) << 7-j)
+            g = g | (bitget(c, 1) << 7-j)
+            b = b | (bitget(c, 2) << 7-j)
+            c = c >> 3
+
+        cmap[i] = np.array([r, g, b])
+
+    cmap = cmap/255 if normalized else cmap
+    return cmap
+
+PASCAL_VOC_CMAP = color_map()
 
 def make_logger(*, verbose):
     def log(*args, **kwargs):

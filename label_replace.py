@@ -17,7 +17,7 @@ def parse_args():
              'This does not have to be a permutation in the mathematical sense.'
     )
     parser.add_argument(
-        '-n', '--names', nargs='+',
+        '-n', '--names', nargs='+', required=True,
         help='list of new class labels into which the old labels will be transformed'
     )
     parser.add_argument(
@@ -42,14 +42,12 @@ def make_backup(path, root):
     # for [image_name].txt files
     backup_dir = root / '__backup__'
     backup_path = backup_dir / path.relative_to(root)
-    # print(f'path={path}, root={root}, backup_dir={backup_dir}')
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(path, backup_path)
     # for the labels.txt file
     labels_txt = root / 'labels.txt'
     if labels_txt.exists():
         labels_txt_backup = backup_dir / labels_txt.relative_to(root)
-        # print(f'labels_txt={labels_txt}, labels_txt_backup={labels_txt_backup}')
         labels_txt_backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(labels_txt, labels_txt_backup)
 
@@ -85,14 +83,17 @@ def main(*, root, permutation, names, backup):
             sys.exit(1)
         break
     
+    labels = list((root / 'labels').rglob('*.txt'))
+    n_total = len(labels)
+
     if backup:
-        for path in tqdm((root / 'labels').rglob('*.txt'), desc='Makeing backups...'):
+        for path in tqdm(labels, desc='Making backups...'):
             make_backup(path, root)
-    for path in tqdm((root / 'labels').rglob('*.txt'), desc='Rewriteing labels...'):
+    for path in tqdm(labels, desc='Rewriting labels...'):
         rewrite_label(path, permutation)
     make_labels_txt(root, classes_new)
     
-    print('done')
+    print('Done')
 
 if __name__ == '__main__':
     args = parse_args()

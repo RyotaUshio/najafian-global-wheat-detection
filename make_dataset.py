@@ -175,7 +175,7 @@ def make_path(args):
     pathes = namedtuple(
         'pathes',
         ['mask_dir', 'rep_dir', 'field_dir', 'back_dir', 
-        'output_dir', 'output_images_dir', 'output_labels_dir', 'output_labeled_images_dir'],
+        'output_dir', 'output_images_dir', 'output_labels_dir', 'output_masks_dir', 'output_labeled_images_dir'],
         # 'output_domain_adaptation_dir', 'output_domain_adaptation_images_dir', 'output_domain_adaptation_labels_dir', 'output_domain_adaptation_labeled_images_dir'],
         # defaults=[None, None, None, None, None]
         defaults=[None]
@@ -188,25 +188,16 @@ def make_path(args):
         back_dir=args.back,
         output_dir=args.output,
         output_images_dir=args.output / 'images/all',
-        output_labels_dir=args.output / 'labels/all'
+        output_labels_dir=args.output / 'labels/all',
+        output_masks_dir=args.output / 'masks/all'
     )       
     p.output_images_dir.mkdir(parents=True, exist_ok=True)
     p.output_labels_dir.mkdir(parents=True, exist_ok=True)
+    p.output_masks_dir.mkdir(parents=True, exist_ok=True)
 
     if args.bbox:
         p = p._replace(output_labeled_images_dir=p.output_dir / 'labeled_images')
         p.output_labeled_images_dir.mkdir(exist_ok=True)
-
-    # if args.domain_adaptation is not None:
-    #     p = p._replace(output_domain_adaptation_dir=args.domain_adaptation)
-    #     p = p._replace(output_domain_adaptation_images_dir=p.output_domain_adaptation_dir / 'images/all')
-    #     p = p._replace(output_domain_adaptation_labels_dir=p.output_domain_adaptation_dir / 'labels/all')
-    #     p.output_domain_adaptation_images_dir.mkdir(parents=True, exist_ok=True)
-    #     p.output_domain_adaptation_labels_dir.mkdir(parents=True, exist_ok=True)
-    #     if args.bbox:
-    #         p = p._replace(output_domain_adaptation_labeled_images_dir=p.output_domain_adaptation_dir / 'labeled_images')
-    #         p.output_domain_adaptation_labeled_images_dir.mkdir(parents=True, exist_ok=True)
-    #         path = p.output_domain_adaptation_labeled_images_dir
 
     return p
 
