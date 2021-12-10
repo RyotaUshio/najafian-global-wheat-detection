@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 import torchvision
 import cv2
@@ -13,6 +14,7 @@ from typing import ClassVar, Callable, Iterable, Union, Dict, List
 import time
 from collections import OrderedDict, defaultdict, namedtuple
 import contextlib
+import itertools
 from tqdm.auto import tqdm
 
 import utils
@@ -343,10 +345,11 @@ class RepImage:
     def get_objects(self, **kwargs):
         keys = ['i_class', 'class_name']
         if not kwargs:
-            objects = []
-            for i_class in range(len(self.classes)):
-                objects += self.get_objects(i_class=i_class)
-            return objects
+            return list(itertools.chain.from_iterable(self.objects.values()))
+            # objects = []
+            # for i_class in range(len(self.classes)):
+            #     objects += self.get_objects(i_class=i_class)
+            # return objects
 
         if len(kwargs) != 1 or all([not key in kwargs for key in keys]):
             raise ValueError(f'{self.__class__.__name__}.get_objects requires exactly 1 keyword argument: i_class or class_name')
@@ -354,6 +357,9 @@ class RepImage:
         if i_class is None:
             i_class = self.classes.index(kwargs['class_name'])
         return self.objects[i_class]
+
+    def __eq__(self, other: RepImage):
+        return self.p_image.samefile(other.p_image) and self.p_mask.samefile(other.p_mask)
 
 
 @dataclasses.dataclass
@@ -440,7 +446,149 @@ class ForegroundObject:
             return mask_info
 
 
+class ObjectDatabase:
+    def __init__(self, classes: List[str]):
+        self.classes = classes
+        self.n_class = len(self.classes)
+        self.table = [[] for _ in self.classes] # self.table[i_class] is a list of ForegroundObjects belonging to the i_class-th class
+        self.rep_images = []
+        self.orig_images = []
+        self.stats = DatabaseStats(self)
+
+    def get(self, key: Union[int, str]=None):
+        try:
+            if key is None: # return objects of the all classes
+                return list(itertools.chain.from_iterable(self.table))
+            elif isinstance(key, int): # key is i_class
+                return self.table[key]
+            elif isinstance(key, str): # key is class_name
+                i_class = self.classes.index(key)
+                return self.table[i_class]
+        except Exception as e:
+            print(f'Database.get(): An exception occured when accessing the objects of class {key}:')
+            raise e
+
+    def add(self, obj: Union[ForegroundObject, RepImage, FieldVideo]):
+        if isinstance(obj, (RepImage, FieldVideo)):
+            for obj in obj.get_objects():
+                self.add(obj)
+                # self.table[i_class] += objects
+        elif isinstance(obj, ForegroundObject):
+            i_class = obj.i_class
+            self.table[i_class].append(obj)
+            if obj.rep_image not in self.rep_images:
+                self.rep_images.append(obj.rep_image)
+                self.orig_images.append(obj.rep_image.orig_image)
+        else:
+            raise TypeError(f'Argument of invalid type {type(obj)} was given')
+        
+    def __repr__(self):
+        n_obj = []
+        for i_class, class_name in enumerate(self.classes):
+            objects = self.get(i_class)
+            n_obj.append(len(objects))
+        return '\n'.join(
+            [f'{self.__class__.__name__}['] + 
+            [f'    {class_name}:' + '\t' + f'{n_obj[i_class]} objects' for i_class, class_name in enumerate(self.classes)] + 
+            ['    ' + '-'*25] + 
+            ['    all:' + '\t' + f'{sum(n_obj)} objects'] + 
+            [']']
+        )
+
+    @contextlib.contextmanager           
+    def set_images_temporarily(self, tmp_images):
+        """context manager to set temporary rep-images
+
+        The passed images must be \"spatially compatible\" with the original images. 
+        You will get a broken result if **tmp_images** are output of data augmentation
+        where coordinates are not preserved (i.e. augmentation which is not pixel-wise).
+        """
+        assert len(tmp_images) == len(self.orig_images)
+        try:
+            for rep_image, tmp_image in zip(self.rep_images, tmp_images):
+                rep_image.set_image(tmp_image)
+            yield
+        finally:
+            for rep_image, orig_image in zip(self.rep_images, self.orig_images):
+                rep_image.set_image(orig_image)
+
+    def random_iter(self, *, total, p, min_n_obj):
+        return DatabaseRandomIterator(self, total=total, p=p, min_n_obj=min_n_obj)
+
+
+class DatabaseStats:
+    __agg_func = {
+        'mean': np.mean, 
+        'std': lambda data: np.std(data, ddof=1),
+        'raw': lambda data: data,
+        'sum': np.sum
+    }
+
+    def __init__(self, database):
+        self.database = database
+
+    def n_obj(self, *, pivot):
+        if pivot == 'class':
+            return [len(self.database.get(i_class) for i_class in range(self.database.n_class))]
+        elif pivot == 'image': 
+            return [len(rep_image.get_objects()) for rep_image in self.database.rep_images]
+        raise ValueError(f'expected "class" or "image" as pivot, got {pivot}')
+
+    def __call__(self, name: str, mode=[], **kwargs):
+        data_getter = getattr(self, name)
+        data = data_getter(**kwargs)
+        ret = []
+        for mode in mode:
+            stat = self.__agg_func[mode](data)
+            ret.append(stat)
+        return tuple(ret)
+
+
+class DatabaseRandomIterator:
+    def __init__(self, database: ObjectDatabase, *, total: int, p: List[float]=None, min_n_obj=3):
+        self.database = database
+        self.n_class = database.n_class
+        self.min_n_obj = min_n_obj
+        self.validate_database() 
+        self.counter = 0
+        self.total = total
+        if p is None:
+            self.get_candidate_objects = self._get_candidate_objects_non_class_aware # randomly sample an object regardless of its class
+        else:
+            self.get_candidate_objects = self._get_candidate_objects_class_aware # randomly sample a class first, then randomly sample an object from that class
+            self.p = p # class probabilities
+        self.rng = np.random.default_rng()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.counter >= self.total:
+            raise StopIteration
+        objects = self.get_candidate_objects()
+        obj = self.rng.choice(objects)
+        self.counter += 1
+        return obj
+
+    def _get_candidate_objects_non_class_aware(self):
+        return self.database.get()
+
+    def _get_candidate_objects_class_aware(self):
+        i_class = self.rng.choice(range(self.n_class), p=self.p)
+        return self.database.get(i_class)
+
+    def validate_database(self):
+        for i_class in range(self.n_class):
+            objects = self.database.get(i_class)
+            n_obj = len(objects)
+            if n_obj < self.min_n_obj:
+                class_name = self.database.classes[i_class]
+                raise ValueError(f'database failed in validation: class "{class_name}" has too few objects ({n_obj} < {self.min_n_obj})')
+
+
 class BaseLabel:
+    """Base class of YoloLable, MaskLabel(, PascalVOCLabel, CocoLabel).
+    """
     def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width:int=None, image_height:int=None, requires_size:bool=True):
         self._validate_args(image=image, image_width=image_width, image_height=image_height)
         if requires_size:
@@ -463,19 +611,13 @@ class BaseLabel:
         else:
             assert image_width is None and image_height is None
 
+
 class YoloLabel(BaseLabel):
+    """YOLO format bounding box annotation.
+    """
     def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width:int=None, image_height:int=None, min_area:float=None):
         super().__init__(image=image, image_width=image_width, image_height=image_height, requires_size=True)
-        # self._validate_args(image=image, image_width=image_width, image_height=image_height)
         self.bboxes = []
-        # if isinstance(image, torch.Tensor):
-        #     self.image_width = float(image.shape[-1])
-        #     self.image_height = float(image.shape[-2])
-        # elif isinstance(image, np.ndarray):
-        #     self.image_width = float(image.shape[-2])
-        #     self.image_height = float(image.shape[-3])
-        # elif image is not None:
-        #     raise TypeError('image must be either tensor or ndarray')
         self.bboxes_voc = []
         if min_area is None:
             min_area = 0.0
@@ -567,6 +709,8 @@ class YoloLabel(BaseLabel):
 
 
 class MaskLabel(BaseLabel):
+    """Pixel-wise label of semantic masks.
+    """
     def __init__(self, image: Union[torch.Tensor, np.ndarray]=None, *, image_width:int=None, image_height:int=None):
         super().__init__(image=image, image_width=image_width, image_height=image_height, requires_size=True)
         self.instance_masks = []
@@ -594,8 +738,6 @@ class MaskLabel(BaseLabel):
     def save(self, fname):
         voc = self.to_voc()
         utils.save_image(voc, fname)
-        #path = pathlib.Path(fname)
-        #np.savetxt(path.parent / (path.stem + '.txt'), voc.numpy())
 
 def foreground_augmentation(field_video: FieldVideo, intensity: float):
     """apply data augmentation to all the representative images of the given field video.
@@ -629,22 +771,31 @@ def background_augmentation(frame: Union[np.ndarray, torch.Tensor], intensity: f
     image = utils.numpyimage_to_tensor(image)
     return image
 
-class HasNoRepImage(Exception):
-    """raised when a given FieldVideo object has no RepImage objects in it.
-    """
+# class HasNoRepImage(Exception):
+#     """raised when a given FieldVideo object has no RepImage objects in it.
+#     """
 
 
 def make_composite_image(
-        *, field_video: FieldVideo, back_video: BackgroundVideo, pathes: namedtuple, 
-        prob: Union[List[float], None], suffix: str, bbox: bool, 
+        *, 
+        database: ObjectDatabase,
+        # field_video: FieldVideo, 
+        back_video: BackgroundVideo, 
+        pathes: namedtuple, 
+        prob: Union[List[float], None], 
+        suffix: str, 
+        bbox: bool, 
         # device, 
-        augment_intensity: float, index: int
+        augment_intensity: float, 
+        index: int,
+        n_obj_mean: float, 
+        n_obj_std: float
     ):
     frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations
-    frame, label, mask = synthesize(frame=frame, field_video=field_video, prob=prob, augment_intensity=augment_intensity)# , device=device)
+    frame, label, mask = synthesize(frame=frame, database=database, prob=prob, augment_intensity=augment_intensity, n_obj_mean=n_obj_mean, n_obj_std=n_obj_std)# , device=device)
 
     # save as files
-    output_stem = f'synth_back_{back_video.stem}_field_{field_video.stem}_{index}'
+    output_stem = f'composite_back_{back_video.stem}_{index}'
     output_image_name = pathes.output_images_dir / (output_stem + utils.with_dot(suffix))
     output_label_name = pathes.output_labels_dir / (output_stem + '.txt')
     output_mask_name = pathes.output_masks_dir / (output_stem + '.jpg')
@@ -654,9 +805,9 @@ def make_composite_image(
 
     if bbox:
         output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
-        utils.save_labeled_image(frame, label, output_labeled_image_name, field_video.classes)
+        utils.save_labeled_image(frame, label, output_labeled_image_name, database.classes)
 
-def synthesize(*, frame, field_video, augment_intensity: float, prob: None):# , device='cpu'):
+def synthesize(*, frame, database, augment_intensity: float, prob: None, n_obj_mean: float, n_obj_std: float): # , device='cpu'):
     """randomly place foreground objects onto the given frame in-place
 
     frame: a frame taken from a background video
@@ -668,28 +819,15 @@ def synthesize(*, frame, field_video, augment_intensity: float, prob: None):# , 
     - frame and all the rep-images of field_video are assume to be on cpu device at the call of this function.
     - device control is not implemented yet.
     """
-    if not field_video.rep_images:
-        raise HasNoRepImage(f'field_video {field_video.p_video} has no rep_image') 
-    rng = np.random.default_rng()
-    n_obj = int(rng.normal(loc=6, scale=1.5)) # 謎のヒューリティクス
-    n_class = len(field_video.classes)
+    n_obj = int(np.random.normal(loc=n_obj_mean, scale=n_obj_std)) # number of the objects scattered in the frame
+    n_class = database.n_class
     yololabel = YoloLabel(frame)
     masklabel = MaskLabel(frame)
-    rep_images_aug = foreground_augmentation(field_video, augment_intensity)
+    rep_images_aug = foreground_augmentation(database, augment_intensity)
     frame_aug = background_augmentation(frame, augment_intensity)
 
-    with field_video.rep_images_as(rep_images_aug):
-        for _ in range(n_obj):
-            if prob is None:
-                objects = field_video.get_objects()
-            else:
-                while True:
-                    i_class = rng.choice(range(n_class), p=prob)
-                    objects = field_video.get_objects(i_class=i_class)
-                    if objects: # retry if empty
-                        break
-            
-            obj = rng.choice(objects)
+    with database.set_images_temporarily(rep_images_aug):
+        for obj in database.random_iter(total=n_obj, p=prob, min_n_obj=3):
             bbox, mask_info = obj.random_place(frame_aug, return_bbox=True, return_mask=True)
             yololabel.add(i_class=obj.i_class, bbox=bbox)
             masklabel.add(mask_info)
@@ -705,13 +843,10 @@ def make_rotated_rep_image(rep_image: RepImage, *, pathes: namedtuple, bbox: boo
         output_stem = f'{rep_image.p_image.stem}_{degree:03}degrees'
         output_image_name = pathes.output_images_dir / (output_stem + utils.with_dot(suffix))
         output_label_name = pathes.output_labels_dir / (output_stem + '.txt')
-        # output_image_name = pathes.output_domain_adaptation_images_dir / (output_stem + utils.with_dot(suffix))
-        # output_label_name = pathes.output_domain_adaptation_labels_dir / (output_stem + '.txt')
         utils.save_image(image, output_image_name)
         label.save(output_label_name)
         if bbox:
             output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
-            # output_labeled_image_name = pathes.output_domain_adaptation_labeled_images_dir / output_image_name.name
             utils.save_labeled_image(image, label, output_labeled_image_name, rep_image.classes)
         pbar.update(1)
             

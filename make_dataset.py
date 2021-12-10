@@ -121,6 +121,11 @@ def parse_args():
         'An area is calculated as width x height, where width and height are an float in range (0, 1]'),
         type=float
     )
+    parser.add_argument(
+        '-f', '--force',
+        help='if specified, existing output directory will be overwritten without asking',
+        action='store_true'
+    )
 
     args = parser.parse_args()
     if args.task == 'rotate':
@@ -159,7 +164,7 @@ def parse_args():
                 raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(args_dict[key]))
         # elif args_dict[key] is not None: # args.domain_adaptation might be None
         #     if args_dict[key].exists() and not args.resume:
-        elif args_dict[key].exists() and not args.resume:
+        elif not args.force and args_dict[key].exists() and not args.resume:
             while True:
                 ans = input(f'{args_dict[key]} already exists. Are you sure to overwrite? (y/n) --> ')
                 if ans in ['y', 'yes', 'n', 'no']:
@@ -201,35 +206,33 @@ def make_path(args):
 
     return p
 
-def make_division(n_sample, *args):
-    """calculate the optimal division of n_sample
-    n_sample: total number of samples to be divided
-    *args: iterables
-    """
-    lens = [len(arg) for arg in args]
-    n_division = np.prod(lens)
-    q = n_sample // n_division
-    r = n_sample % n_division
-    divisions = np.full(lens, q)
-    for i in range(r):
-        divisions.ravel()[i] += 1
-    return divisions
+# def make_division(n_sample, *args):
+#     """calculate the optimal division of n_sample
+#     n_sample: total number of samples to be divided
+#     *args: iterables
+#     """
+#     lens = [len(arg) for arg in args]
+#     n_division = np.prod(lens)
+#     q = n_sample // n_division
+#     r = n_sample % n_division
+#     divisions = np.full(lens, q)
+#     for i in range(r):
+#         divisions.ravel()[i] += 1
+#     return divisions
 
 def get_start_indices(pathes):
-    start_indices = defaultdict(lambda: defaultdict(int))
-    reps = list(set([rep.stem[:-5] for rep in pathes.rep_dir.glob('*.png')]))
-    for rep in reps:
-        for back in pathes.back_dir.iterdir():
-            head = f'synth_back_{back.stem}_field_{rep}_'
-            key = lambda p: int(re.match(head + r'(\d+)', p.stem).groups()[0])
-            try:
-                start_indices[back.stem][rep] = max(map(key, pathes.output_images_dir.glob(head + '*'))) + 1 # start_index = last_index + 1
-            except ValueError:
-                continue
-    return start_indices # {k: dict(v) for k, v in start_indices.items()}
+    start_indices = defaultdict(int)
+    for back in pathes.back_dir.iterdir():
+        head = f'composite_back_{back.stem}_'
+        key = lambda p: int(re.match(head + r'(\d+)', p.stem).groups()[0])
+        try:
+            start_indices[back.stem] = max(map(key, pathes.output_images_dir.glob(head + '*'))) + 1 # start_index = last_index + 1
+        except ValueError:
+            continue
+    return start_indices
 
-class NoJobToDo(Exception):
-    pass
+# class NoJobToDo(Exception):
+#     pass
 
 
 def main():
@@ -247,8 +250,10 @@ def main():
     n_class = len(classes)
     logger('done')
 
-    # generate objects of FieldVideo, RepImage, ForegroundObject, BackgroundVideo
+    # generate objects of FieldVideo, RepImage, ForegroundObject, BackgroundVideo, ObjectDatabase
     logger('constructing asset objects...', end='')
+
+    # FieldVideo, RepImage & ForegroundObject
     field_videos = []
     for suffix in utils.VID_FORMATS:
         suffix = utils.with_dot(suffix)
@@ -261,21 +266,28 @@ def main():
             )
             field_videos.append(video)
 
+    # BackgroundVideo
     back_videos = []
     for suffix in utils.VID_FORMATS:
         suffix = utils.with_dot(suffix)
         for p_video in p.back_dir.glob(f'*{suffix}'):
             video = mkdata.BackgroundVideo(p_video=p_video)
             back_videos.append(video)        
+
+    # ObjectDatabase
+    database = mkdata.ObjectDatabase(classes=classes)
+    for field_video in field_videos:
+        database.add(field_video)
+
     logger('done')
 
+    # do stuff
     if args.task == 'composite':
-        composite(args=args, p=p, logger=logger, field_videos=field_videos, back_videos=back_videos, classes=classes, n_class=n_class)
-    # if args.domain_adaptation is not None:
+        composite(args=args, p=p, logger=logger, database=database, field_videos=field_videos, back_videos=back_videos, classes=classes, n_class=n_class)
     elif args.task == 'rotate':
         rotate(args=args, p=p, logger=logger, field_videos=field_videos)
 
-def composite(*, args, p, logger, field_videos, back_videos, classes, n_class):
+def composite(*, args, p, logger, database, field_videos, back_videos, classes, n_class):
     if args.resume:
         logger('searching for where you left off...', end='')
         start_indices = get_start_indices(p)
@@ -292,48 +304,92 @@ def composite(*, args, p, logger, field_videos, back_videos, classes, n_class):
     # simulate datasets for each pair of (a background video, set of foregound objects in a video)
     logger('synthesizing dataset...')
 
-    field_videos_with_rep_images = [video for video in field_videos if video.rep_images]
-    division = make_division(
-        args.n_sample, 
-        back_videos, 
-        field_videos_with_rep_images
-    ) # make optimal divisions
+    n_back = len(back_videos)
+    q = args.n_sample // n_back
+    r = args.n_sample % n_back
+    # number of the composite images that will be generated for each BackgroundVideo object
+    n_composite_per_back_video = np.array([q] * n_back)
+    n_composite_per_back_video[:r] += 1 
+
+    # get statistics used to determine number of objects in each composite image
+    n_obj_mean, n_obj_std = database.stats('n_obj', mode=['mean', 'std'], pivot='image')
+
+    # get where to begin
+    initial = 0
+    if args.resume:
+        n_sample_generated = sum(start_indices.values())
+        initial = n_sample_generated
+        if n_sample_generated >= args.n_sample:
+            return
     try:
-        initial = 0
-        if args.resume:
-            n_sample_generated = sum([sum(v.values()) for v in start_indices.values()])
-            initial = n_sample_generated
-            if n_sample_generated >= args.n_sample:
-                raise NoJobToDo(f'{n_sample_generated} samples have already been generated.')
         with tqdm(initial=initial, total=args.n_sample, dynamic_ncols=True) as pbar:
-            for i, back_video in enumerate(back_videos):
+            for back_video, n_composite in zip(back_videos, n_composite_per_back_video):
                 with back_video.open():
-                    for j, field_video in enumerate(field_videos_with_rep_images):
-                        if args.resume:
-                            start_index = start_indices[back_video.stem][field_video.stem] # last_index + 1 if key exists, 0 otherwise
-                            if start_index > division[i, j]:
-                                raise ValueError(f'it seems like more than {args.n_sample} samples have already been generated')
-                        else:
-                            start_index = 0
-                        for index in range(start_index, division[i, j]):
-                            mkdata.make_composite_image(
-                                field_video=field_video, 
-                                back_video=back_video, 
-                                pathes=p, 
-                                prob=prob,
-                                suffix=args.suffix,
-                                bbox=args.bbox,
-                                # device=device,
-                                augment_intensity=args.augment,
-                                index=index
-                            )
-                            pbar.update(1)
+                    if args.resume:
+                        start_index = start_indices[back_video.stem]
+                    else:
+                        start_index = 0
+                    for index in range(start_index, n_composite):
+                        mkdata.make_composite_image(
+                            database=database,
+                            back_video=back_video,
+                            pathes=p,
+                            prob=prob, 
+                            suffix=args.suffix,
+                            bbox=args.bbox,
+                            augment_intensity=args.augment,
+                            index=index,
+                            n_obj_mean=n_obj_mean,
+                            n_obj_std=n_obj_std
+                        )
+                        pbar.update(1)
     except KeyboardInterrupt:
         logger('interrupted by keyboard')
-    except NoJobToDo as e:
-        logger(e)
     else:
         logger('done')
+
+    # field_videos_with_rep_images = [video for video in field_videos if video.rep_images]
+    # division = make_division(
+    #     args.n_sample, 
+    #     back_videos, 
+    #     field_videos_with_rep_images
+    # ) # make optimal divisions
+    # try:
+    #     initial = 0
+    #     if args.resume:
+    #         n_sample_generated = sum([sum(v.values()) for v in start_indices.values()])
+    #         initial = n_sample_generated
+    #         if n_sample_generated >= args.n_sample:
+    #             raise NoJobToDo(f'{n_sample_generated} samples have already been generated.')
+    #     with tqdm(initial=initial, total=args.n_sample, dynamic_ncols=True) as pbar:
+    #         for i, back_video in enumerate(back_videos):
+    #             with back_video.open():
+    #                 for j, field_video in enumerate(field_videos_with_rep_images):
+    #                     if args.resume:
+    #                         start_index = start_indices[back_video.stem][field_video.stem] # last_index + 1 if key exists, 0 otherwise
+    #                         if start_index > division[i, j]:
+    #                             raise ValueError(f'it seems like more than {args.n_sample} samples have already been generated')
+    #                     else:
+    #                         start_index = 0
+    #                     for index in range(start_index, division[i, j]):
+    #                         mkdata.make_composite_image(
+    #                             field_video=field_video, 
+    #                             back_video=back_video, 
+    #                             pathes=p, 
+    #                             prob=prob,
+    #                             suffix=args.suffix,
+    #                             bbox=args.bbox,
+    #                             # device=device,
+    #                             augment_intensity=args.augment,
+    #                             index=index
+    #                         )
+    #                         pbar.update(1)
+    # except KeyboardInterrupt:
+    #     logger('interrupted by keyboard')
+    # except NoJobToDo as e:
+    #     logger(e)
+    # else:
+    #     logger('done')
 
 def rotate(*, logger, field_videos, args, p):
     logger('generating images & labels for the first step of domain adaptation...')
