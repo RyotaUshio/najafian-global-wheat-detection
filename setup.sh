@@ -1,7 +1,3 @@
-sudo apt install emacs
-mkdir -p /root/.emacs.d/
-echo '(global-set-key "\C-h" `delete-backward-char)' > /root/.emacs.d/init.el
-echo '(global-set-key "\M-g" `goto-line)' >> /root/.emacs.d/init.el
 git config --global user.name RyotaUshio
 git config --global user.email gt0410ushi@g.ecc.u-tokyo.ac.jp
 cd /content/drive/MyDrive/
@@ -14,3 +10,8 @@ cd yolov5
 pip install -qr requirements.txt
 cd ..
 # pip install --upgrade albumentations
+pip uninstall opencv-python-headless==4.5.5.62 -y
+pip install opencv-python-headless==4.1.2.30
+cd pytorch-CycleGAN-and-pix2pix
+pip install -r requirements.txt
+cd ..

@@ -20,12 +20,22 @@ def with_dot(suffix):
         suffix = '.' + suffix
     return suffix
 
+def make_formats(formats):
+    results = []
+    for suffix in formats:
+        suffix = with_dot(suffix)
+        results += [suffix.lower(), suffix.upper()]
+    return results
+
+IMG_FORMATS = make_formats(IMG_FORMATS)
+VID_FORMATS = make_formats(VID_FORMATS)
+
 def get_classes(p_labels):
     classes = []
     with open(p_labels) as f:
         for line in f:
             line = line.rstrip()
-            if line not in ['__ignore__', '_background_']:
+            if line not in ['__ignore__', '_background_', '']:
                 classes.append(line)
     return classes
 
@@ -253,3 +263,8 @@ def make_background_augmentation(p=0.5):
         A.VerticalFlip(p=p)]
     )
     return transform
+
+def random_scale_jitter(frame: np.ndarray):
+    return torchvision.transforms.functional.random_affine(
+        frame, degrees=0, translate=(0.2, 0.4), scale=(0.1, 2.0), fill=127
+    )

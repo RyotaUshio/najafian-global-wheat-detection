@@ -24,7 +24,8 @@ def parse_args():
               |───image1.txt
               ...
                      
-    images/labels in "all" will be split into train/val/test subsets.'''
+    images/labels in "all" will be split into train/val/test subsets.''',
+    nargs='+'
   )
   parser.add_argument(
     '--train', 
@@ -50,12 +51,12 @@ def parse_args():
   )
   parser.add_argument(
     '-c', '--copy',
-    help='whether to copy the files in "images/all" and "labels/all" to the output directory',
+    help='[deprecated] whether to copy the files in "images/all" and "labels/all" to the output directory',
     action='store_true'
   )
   parser.add_argument(
     '-m', '--move',
-    help='whether to move the files in "images/all" and "labels/all" to the output directory. This action is destructive',
+    help='[deprecated] whether to move the files in "images/all" and "labels/all" to the output directory. This action is destructive',
     action='store_true'
   )
   parser.add_argument(
@@ -83,7 +84,7 @@ def parse_args():
     raise ValueError("Results will not be exported unless at least one of ('move', 'copy', 'text') is specified")
 
   if args.output is None:
-    args.output = args.path
+    args.output = args.path[0]
   
   return args, size_spec
 
@@ -109,15 +110,18 @@ def random_split(seq, n_train, n_test, n_val):
 
 def main():
   args, size_spec = parse_args()
-  p_root = pathlib.Path(args.path)
-  p_images = p_root / 'images'
-  p_labels = p_root / 'labels'
-  p_images_all = p_images / 'all'
-  p_labels_all = p_labels / 'all'
   p_out = pathlib.Path(args.output)
   p_out.mkdir(parents=True, exist_ok=True)
 
-  images = get_image_list(p_images_all)
+  images = []
+  for path in args.path:
+    p_root = pathlib.Path(path)
+    p_images = p_root / 'images'
+    p_labels = p_root / 'labels'
+    p_images_all = p_images / 'all'
+    p_labels_all = p_labels / 'all'
+    images += get_image_list(p_images_all)
+
   n_image_all = len(images)
   if size_spec == 'abs':
     n_image = args.train + args.test + args.val
@@ -130,6 +134,8 @@ def main():
     args.train = int(n_image_all * args.train)
     args.test = int(n_image_all * args.test)
     args.val = n_image_all - args.train - args.test
+
+  print(f'{n_image_all} images found: {args.train} for train, {args.test} for test and {args.val} for val')
 
   train, test, val = random_split(images, args.train, args.test, args.val)
   divisions = dict(train=train, test=test, val=val)
@@ -149,7 +155,7 @@ def main():
     for p_image in division:
       image_name = p_image.name
       label_name = p_image.stem + '.txt'
-      p_label = p_labels_all / label_name
+      p_label = p_labels_all / label_name # here can be a bug for len(args.path) > 1
       if args.copy:
         shutil.copy(p_image, p_images_division)
         shutil.copy(p_label, p_labels_division)
@@ -157,7 +163,11 @@ def main():
         shutil.move(str(p_image), str(p_images_division))
         shutil.move(str(p_label), str(p_labels_division))
       if args.text:
-        f.write(str(p_image) + '\n')
+        try:
+          f.write(str(p_image.resolve()) + '\n')
+        except Exception as e:
+          print(f'An exception occured while handling {p_image}:')
+          raise e
 
 if __name__ == '__main__':
   main()

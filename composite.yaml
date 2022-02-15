@@ -1,7 +1,8 @@
-path: /content/drive/MyDrive/chestnut-detection/datasets/20211121/composite
+path: /content/drive/MyDrive/chestnut-detection/datasets/20220122/composite_4classes_jitter_unbalanced
 train: images/all
 val: ../domain_adaptation_1/images/all
 test: ../../20210821/images/all
 
 nc: 4
-names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut']
+names: ['nut_fine', 'nut_empty', 'nut_in_burr', 'burr']
+# names: ['nut(fine)', 'nut(empty)', 'burr', 'burr+nut']

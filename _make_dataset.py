@@ -128,7 +128,7 @@ def make_classwise_mask(p_mask, n_class):
 def make_objectwise_mask(classwise_masks, n_class):
     """classwise_masks: tensor of shape n_class x H x W (stack of masks)
     """
-    ret = dict()
+    ret = OrderedDict()
     for i_class in range(n_class):
         objectwise_masks = skimage.measure.label(classwise_masks[i_class].cpu()) # labels connected components
         object_id = np.unique(objectwise_masks)[1:] # ignore background = 0
@@ -213,6 +213,8 @@ class FieldVideo(Video):
     classes: List[str]
     device: dataclasses.InitVar[Union[str, torch.device]] = 'cpu'
 
+    label_editor: dataclasses.InitVar[Callable] = None
+
     rep_images: List['RepImage'] = dataclasses.field(init=False, default_factory=list)
     orig_images: List[torch.Tensor] = dataclasses.field(init=False)
 
@@ -220,7 +222,8 @@ class FieldVideo(Video):
         self, 
         p_rep_images: pathlib.Path, 
         p_masks: pathlib.Path,
-        device: Union[str, torch.device]
+        device: Union[str, torch.device],
+        label_editor
     ):
         super().__post_init__()
         # make sure pathes are pathlib.Path objects
@@ -230,8 +233,9 @@ class FieldVideo(Video):
         for suffix in utils.IMG_FORMATS:
             for p_rep_image in p_rep_images.glob(f'{self.stem}_*{suffix}'):
                 p_mask = p_masks / (p_rep_image.stem + '.npy')
-                image = RepImage(p_image=p_rep_image, p_mask=p_mask, video=self, classes=self.classes, device=device, stem=self.stem)
+                image = RepImage(p_image=p_rep_image, p_mask=p_mask, video=self, classes=self.classes, device=device, stem=self.stem, label_editor=label_editor)
                 self.rep_images.append(image)
+        self.classes = image.classes # reflect the effect of label_editor
         self.orig_images = [rep_image.orig_image for rep_image in self.rep_images] # make copy for rep_image_as()
 
     @contextlib.contextmanager
@@ -267,6 +271,8 @@ class RepImage:
     device: torch.device = 'cpu'
     stem: str = None
 
+    label_editor: dataclasses.InitVar[Callable] = None
+
     timestamp: time.struct_time = dataclasses.field(init=False)
     image: torch.Tensor = dataclasses.field(init=False)
     orig_image: torch.Tensor = dataclasses.field(init=False)
@@ -276,7 +282,7 @@ class RepImage:
     objectwise_mask: dict = dataclasses.field(init=False)
     objects: dict = dataclasses.field(init=False)
 
-    def __post_init__(self):
+    def __post_init__(self, label_editor):
         self.device = torch.device(self.device)
         parsed = parse_fname(self.p_image)
         self.timestamp = time.strptime(parsed['time'], '%M%S')
@@ -287,6 +293,15 @@ class RepImage:
         n_class = len(self.classes)
         classwise_mask = make_classwise_mask(self.p_mask, n_class)
         objectwise_mask = make_objectwise_mask(classwise_mask, n_class)
+
+        ### edit masks
+        if label_editor is not None:
+            self.classes, classwise_mask, objectwise_mask = label_editor(
+                classes=self.classes, 
+                classwise_mask=classwise_mask, 
+                objectwise_mask=objectwise_mask
+            )
+
         # send masks to device
         classwise_mask = classwise_mask.to(self.device)
         for i_class, masks in objectwise_mask.items():
@@ -364,7 +379,12 @@ class RepImage:
 
 @dataclasses.dataclass
 class ForegroundObject:
-    __random_rotate: ClassVar[Callable] = torchvision.transforms.RandomRotation(degrees=180, expand=True, fill=0)
+    # ToDo: rename __random_rotate to __random_flip_and_rotate
+    __random_rotate: ClassVar[Callable] = torchvision.transforms.Compose([
+        torchvision.transforms.RandomHorizontalFlip(),
+        torchvision.transforms.RandomRotation(degrees=180, expand=True, fill=0)
+    ])
+    # __random_rotate: ClassVar[Callable] = torchvision.transforms.RandomRotation(degrees=180, expand=True, fill=0)
     __bbox_formats: ClassVar[List[str]] = ['pascal_voc', 'albumentations', 'coco', 'yolo']
 
     rep_image: RepImage
@@ -407,7 +427,7 @@ class ForegroundObject:
     def bbox_to_yolo(self):
         return bbox_to_yolo(self.bbox, image_width=self.rep_image.width, image_height=self.rep_image.height)
 
-    def random_place(self, background, return_bbox=True, return_mask=False):
+    def random_place(self, background, return_bbox=True, return_mask=False, scale_jitter=True):
         """Randomly place the object on the given background image. This is an in-place operation.
         
         Parameters
@@ -415,11 +435,20 @@ class ForegroundObject:
         background: array or tensor
           An image on which the object is placed
         """
-        rotated = self.__random_rotate(     
-            torch.cat(
-                [self.image_cropped, torch.unsqueeze(self.mask_cropped, 0)]
-            )
+        image_and_mask_cropped = torch.cat(
+            [self.image_cropped, torch.unsqueeze(self.mask_cropped, 0)]
         )
+        if scale_jitter:
+            _, crop_height, crop_width = self.image_cropped.size()
+            scale = np.random.uniform(0.1, 2.0) # Ghiasi, G., Cui, Y., Srinivas, A., Qian, R., Lin, T.-Y., Cubuk, E. D., Le, Q. V., & Zoph, B. (2021). Simple Copy-Paste is a Strong Data Augmentation Method for Instance Segmentation. In 2021 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). https://doi.org/10.1109/cvpr46437.2021.00294
+            resized_height, resized_width = int(crop_height * scale), int(crop_width * scale)
+            resized = torchvision.transforms.functional.resize(
+                image_and_mask_cropped, 
+                size=(resized_height, resized_width)
+            )
+            rotated = self.__random_rotate(resized)
+        else:
+            rotated = self.__random_rotate(image_and_mask_cropped)
         image_cropped, mask_cropped = torch.split(rotated, [3, 1], dim=0)
         mask_cropped = torch.squeeze(mask_cropped, dim=0).to(torch.bool)
         _, h, w = image_cropped.size() # size of cropped region after rotation
@@ -459,13 +488,14 @@ class ObjectDatabase:
         try:
             if key is None: # return objects of the all classes
                 return list(itertools.chain.from_iterable(self.table))
-            elif isinstance(key, int): # key is i_class
+            elif isinstance(key, (int, np.int64)): # key is i_class
                 return self.table[key]
             elif isinstance(key, str): # key is class_name
                 i_class = self.classes.index(key)
                 return self.table[i_class]
+            raise TypeError(f'{self.__class__.__name__}.get(): Key of an invalid type (key={key}: {type(key)})')
         except Exception as e:
-            print(f'Database.get(): An exception occured when accessing the objects of class {key}:')
+            print(f'{self.__class__.__name__}.get(): An exception occured when accessing the objects of class {key}:')
             raise e
 
     def add(self, obj: Union[ForegroundObject, RepImage, FieldVideo]):
@@ -756,7 +786,7 @@ def foreground_augmentation(field_video: FieldVideo, intensity: float):
         images.append(image)
     return images
 
-def background_augmentation(frame: Union[np.ndarray, torch.Tensor], intensity: float):
+def background_augmentation(frame: Union[np.ndarray, torch.Tensor], intensity: float, large_scale_jitter=False):
     """apply data augmentation to the given frame of a background video.
 
     Note
@@ -765,6 +795,8 @@ def background_augmentation(frame: Union[np.ndarray, torch.Tensor], intensity: f
     """
     if isinstance(frame, torch.Tensor):
         frame = utils.tensorimage_to_numpy(frame)
+    if large_scale_jitter:
+        frame = utils.random_scale_jitter(frame, mode='large')
     transform = utils.make_background_augmentation(p=intensity)
     transformed = transform(image=frame)
     image = transformed['image']
@@ -789,10 +821,11 @@ def make_composite_image(
         augment_intensity: float, 
         index: int,
         n_obj_mean: float, 
-        n_obj_std: float
+        n_obj_std: float,
+        scale_jitter: bool = True
     ):
     frame = back_video.random_read(device='cpu', noexcept=True, as_numpy=True) # must load into CPU for Albumentations
-    frame, label, mask = synthesize(frame=frame, database=database, prob=prob, augment_intensity=augment_intensity, n_obj_mean=n_obj_mean, n_obj_std=n_obj_std)# , device=device)
+    frame, label, mask = synthesize(frame=frame, database=database, prob=prob, augment_intensity=augment_intensity, n_obj_mean=n_obj_mean, n_obj_std=n_obj_std, scale_jitter=scale_jitter)# , device=device)
 
     # save as files
     output_stem = f'composite_back_{back_video.stem}_{index}'
@@ -807,7 +840,7 @@ def make_composite_image(
         output_labeled_image_name = pathes.output_labeled_images_dir / output_image_name.name
         utils.save_labeled_image(frame, label, output_labeled_image_name, database.classes)
 
-def synthesize(*, frame, database, augment_intensity: float, prob: None, n_obj_mean: float, n_obj_std: float): # , device='cpu'):
+def synthesize(*, frame, database, augment_intensity: float, prob: None, n_obj_mean: float, n_obj_std: float, scale_jitter=True): # , device='cpu'):
     """randomly place foreground objects onto the given frame in-place
 
     frame: a frame taken from a background video
@@ -825,10 +858,10 @@ def synthesize(*, frame, database, augment_intensity: float, prob: None, n_obj_m
     masklabel = MaskLabel(frame)
     rep_images_aug = foreground_augmentation(database, augment_intensity)
     frame_aug = background_augmentation(frame, augment_intensity)
-
+    
     with database.set_images_temporarily(rep_images_aug):
         for obj in database.random_iter(total=n_obj, p=prob, min_n_obj=3):
-            bbox, mask_info = obj.random_place(frame_aug, return_bbox=True, return_mask=True)
+            bbox, mask_info = obj.random_place(frame_aug, return_bbox=True, return_mask=True, scale_jitter=scale_jitter)
             yololabel.add(i_class=obj.i_class, bbox=bbox)
             masklabel.add(mask_info)
 

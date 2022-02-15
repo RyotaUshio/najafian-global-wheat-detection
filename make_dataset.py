@@ -13,6 +13,7 @@ import numpy as np
 
 import _make_dataset as mkdata
 import utils
+import label_editors
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -79,7 +80,7 @@ def parse_args():
     )
     parser.add_argument(
         '-p', '--probability', '--prob', 
-        help='probability that a foreground object is chosen from each class when synthesizving dataset. This must have the same length as number of classes. Defaults to [1/n_class, 1/n_class, ...]', 
+        help='probability that a foreground object is chosen from each class when synthesizving dataset. This must have the same length as number of classes. If not specified, each class will be chosen following the distribution observed in the original representative images', 
         nargs='*', 
         type=float
     )
@@ -99,9 +100,13 @@ def parse_args():
         help='when specified, images with calculated bounding boxes are also saved', 
         action='store_true'
     )
+    parser.add_argument(
+        '--label_editor', 
+        help='[advanced] name of a function defined in label_editors.py'
+    )
     # parser.add_argument(
     #     '-c', '--cuda', 
-    #     help='when specified, try to use cuda if available', 
+    #     help='[deprecated] when specified, try to use cuda if available', 
     #     action='store_true'
     # )
     parser.add_argument(
@@ -114,6 +119,11 @@ def parse_args():
         help='(floating point number between 0.0 and 1.0) intensity of data augmentation applied to foreground and background images',
         type=float,
         default=0.1
+    )
+    parser.add_argument(
+        '--scale-jitter',
+        help='when specified, large scale jittering will be applied before copy-paste', 
+        action='store_true'
     )
     parser.add_argument(
         '-m', '--min-area',
@@ -234,6 +244,38 @@ def get_start_indices(pathes):
 # class NoJobToDo(Exception):
 #     pass
 
+def make_field_videos(*, classes, p_field_dir, p_rep_dir, p_mask_dir, label_editor=None):
+    p_field_dir = pathlib.Path(p_field_dir)
+    p_rep_dir = pathlib.Path(p_rep_dir)
+    p_mask_dir = pathlib.Path(p_mask_dir)
+    field_videos = []
+    for suffix in utils.VID_FORMATS:
+        suffix = utils.with_dot(suffix)
+        for p_video in p_field_dir.glob(f'*{suffix}'):
+            video = mkdata.FieldVideo(
+                p_video=p_video,
+                p_rep_images=p_rep_dir,
+                p_masks=p_mask_dir,
+                classes=classes,
+                label_editor=label_editor
+            )
+            field_videos.append(video)
+    return field_videos
+
+def make_back_videos(*, p_back_dir):
+    back_videos = []
+    for suffix in utils.VID_FORMATS:
+        suffix = utils.with_dot(suffix)
+        for p_video in p_back_dir.glob(f'*{suffix}'):
+            video = mkdata.BackgroundVideo(p_video=p_video)
+            back_videos.append(video)
+    return back_videos
+
+def make_database(*, field_videos):
+    database = mkdata.ObjectDatabase(classes=field_videos[0].classes)
+    for field_video in field_videos:
+        database.add(field_video)
+    return database
 
 def main():
     args = parse_args()
@@ -254,30 +296,12 @@ def main():
     logger('constructing asset objects...', end='')
 
     # FieldVideo, RepImage & ForegroundObject
-    field_videos = []
-    for suffix in utils.VID_FORMATS:
-        suffix = utils.with_dot(suffix)
-        for p_video in p.field_dir.glob(f'*{suffix}'):
-            video = mkdata.FieldVideo(
-                p_video=p_video,
-                p_rep_images=p.rep_dir,
-                p_masks=p.mask_dir,
-                classes=classes
-            )
-            field_videos.append(video)
-
+    label_editor = getattr(label_editors, args.label_editor) if args.label_editor is not None else None
+    field_videos = make_field_videos(classes=classes, p_field_dir=p.field_dir, p_rep_dir=p.rep_dir, p_mask_dir=p.mask_dir, label_editor=label_editor)
     # BackgroundVideo
-    back_videos = []
-    for suffix in utils.VID_FORMATS:
-        suffix = utils.with_dot(suffix)
-        for p_video in p.back_dir.glob(f'*{suffix}'):
-            video = mkdata.BackgroundVideo(p_video=p_video)
-            back_videos.append(video)        
-
+    back_videos = make_back_videos(p_back_dir=p.back_dir)
     # ObjectDatabase
-    database = mkdata.ObjectDatabase(classes=classes)
-    for field_video in field_videos:
-        database.add(field_video)
+    database = make_database(field_videos=field_videos)
 
     logger('done')
 
@@ -295,7 +319,7 @@ def composite(*, args, p, logger, database, field_videos, back_videos, classes, 
 
     # class probabilities
     if args.probability:
-        assert len(args.probability) == n_class, 'n_probability must be equal to n_class'
+        # assert len(args.probability) == n_class, 'n_probability must be equal to n_class'
         prob = np.array(args.probability)
         prob /= prob.sum()
     else:
@@ -340,7 +364,8 @@ def composite(*, args, p, logger, database, field_videos, back_videos, classes, 
                             augment_intensity=args.augment,
                             index=index,
                             n_obj_mean=n_obj_mean,
-                            n_obj_std=n_obj_std
+                            n_obj_std=n_obj_std,
+                            scale_jitter=args.scale_jitter
                         )
                         pbar.update(1)
     except KeyboardInterrupt:
