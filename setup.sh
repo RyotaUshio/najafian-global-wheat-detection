@@ -1,5 +1,3 @@
-git config --global user.name RyotaUshio
-git config --global user.email gt0410ushi@g.ecc.u-tokyo.ac.jp
 cd /content/drive/MyDrive/
 # git clone https://github.com/RyotaUshio/chestnut-detection
 cd chestnut-detection
