@@ -1,4 +1,4 @@
-# Image systhesis with Copy-Paste for Global Wheat Detection
+# Image synthesis with Copy-Paste for Global Wheat Detection
 
 This is an implementation of the method proposed in [Keyhan Najafian, Alireza Ghanbari, Ian Stavness, Lingling Jin, Gholam Hassan Shirdel, and Farhad Maleki. Semi-self-supervised Learning Approach for Wheat Head Detection using Extremely Small Number of Labeled Samples. In *Proceedings of the IEEE/CVF International Conference on Computer Vision*, pages 1342-1351, 2021.](https://openaccess.thecvf.com/content/ICCV2021W/CVPPA/papers/Najafian_A_Semi-Self-Supervised_Learning_Approach_for_Wheat_Head_Detection_Using_Extremely_ICCVW_2021_paper.pdf)
 
